@@ -1,0 +1,13 @@
+[project]
+name = "phenotype"
+version = "0.1.0"
+description = "Phenotyping Raspberry Pi edge service"
+readme = "README.md"
+requires-python = "==3.13.5"
+dependencies = [
+    "fastapi==0.115.6",
+    "httpx==0.28.1",
+    "pydantic-settings==2.6.1",
+    "python-dotenv==1.0.1",
+    "uvicorn[standard]==0.32.1",
+]

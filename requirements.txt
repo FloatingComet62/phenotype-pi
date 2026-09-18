@@ -1,0 +1,18 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+httpx==0.28.1
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+
+# Legacy pip fallback only. The canonical runtime definition is pyproject.toml + uv.lock.
+#
+# Pi camera support (CAMERA_BACKEND=picamera2): do NOT pip install picamera2.
+# Raspberry Pi OS supplies its libcamera bindings instead:
+#   sudo apt install -y python3-picamera2 python3-opencv
+# Create the canonical environment with:
+#   uv venv --python 3.13.5 --system-site-packages
+#   source .venv/bin/activate
+#   uv sync --active --locked
+#
+# USB camera support (CAMERA_BACKEND=usb): add OpenCV to the locked project:
+#   uv add opencv-python-headless

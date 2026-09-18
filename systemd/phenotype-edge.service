@@ -1,0 +1,15 @@
+[Unit]
+Description=Phenotyping Pi Edge Service
+After=network-online.target avahi-daemon.service
+Wants=network-online.target avahi-daemon.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/phenotype
+ExecStart=/home/pi/phenotype/.venv/bin/uvicorn phenotype_edge.app:app --host 0.0.0.0 --port 8090
+Restart=on-failure
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target
