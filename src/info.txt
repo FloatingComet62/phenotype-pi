@@ -1,0 +1,7 @@
+https://docs.cirkitdesigner.com/component/a604a022-3e99-4e62-ba8f-f5f2b1dd3d1f/arduino-uno-wifi-r3-atmega328pesp8266
+https://forum.arduino.cc/t/atmega328p-esp8266-wifi-tutorial/944380
+
+1, 2 = ESP & UNO Talk to each other
+5, 6 = ESP & Serial (for looking at the output in terminal)
+5, 6, 7 = ESP Upload Mode
+3, 4 = UNO Mode (Serial works be default)
