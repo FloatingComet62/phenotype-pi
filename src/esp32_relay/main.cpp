@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
+#include <Preferences.h>
 #include "../secrets.h"
 
 // ---------- Config ----------
@@ -21,19 +22,63 @@ const int AC_PIN = 23;
 #define RELAY_OFF HIGH
 
 WebServer server(80);
+// Output states survive a reboot. With the AC contact wired inverted, a
+// brownout that reboots this board would otherwise switch the AC on by
+// itself; restoring the last commanded state closes that hole.
+Preferences prefs;
 bool relayState[4] = {false, false, false, false}; // logical state, true = ON
 bool acState = false;
 
 // ---------- Helpers ----------
+void saveStates() {
+  uint8_t bits = 0;
+  for (int i = 0; i < NUM_RELAYS; i++) if (relayState[i]) bits |= 1 << i;
+  if (acState) bits |= 1 << 7;
+  prefs.putUChar("out", bits);
+}
+
 void setRelay(int index, bool on) {
   if (index < 0 || index >= NUM_RELAYS) return;
   relayState[index] = on;
   digitalWrite(RELAY_PINS[index], on ? RELAY_ON : RELAY_OFF);
+  saveStates();
 }
 
 void setAC(bool on) {
   acState = on;
   digitalWrite(AC_PIN, on ? RELAY_ON : RELAY_OFF);
+  saveStates();
+}
+
+// ---------- Wi-Fi keepalive (same as the sensor boards) ----------
+bool wifiUp = false;
+unsigned long lastWifiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 15000;
+
+void startMdns() {
+  MDNS.end();
+  if (MDNS.begin(HOSTNAME)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.printf("mDNS responder started: http://%s.local\n", HOSTNAME);
+  } else {
+    Serial.println("Error starting mDNS");
+  }
+}
+
+void ensureWifi() {
+  unsigned long now = millis();
+  if (now - lastWifiCheck < WIFI_CHECK_INTERVAL) return;
+  lastWifiCheck = now;
+  bool up = WiFi.status() == WL_CONNECTED;
+  if (up && !wifiUp) {
+    Serial.print("WiFi up, IP: ");
+    Serial.println(WiFi.localIP());
+    startMdns();
+  } else if (!up) {
+    Serial.println("WiFi down, reconnecting");
+    WiFi.reconnect();
+  }
+  wifiUp = up;
 }
 
 String statusJson() {
@@ -134,8 +179,22 @@ void setup() {
   pinMode(AC_PIN, OUTPUT);
   acState = false;
 
+  // Restore the last commanded outputs (see Preferences note above).
+  prefs.begin("relay", false);
+  uint8_t bits = prefs.getUChar("out", 0);
+  for (int i = 0; i < NUM_RELAYS; i++) {
+    relayState[i] = bits & (1 << i);
+    digitalWrite(RELAY_PINS[i], relayState[i] ? RELAY_ON : RELAY_OFF);
+  }
+  acState = bits & (1 << 7);
+  digitalWrite(AC_PIN, acState ? RELAY_ON : RELAY_OFF);
+  Serial.printf("restored outputs 0x%02x\n", bits);
+
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);  // modem sleep makes some APs drop unicast to this board
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   Serial.print("Connecting to WiFi");
@@ -154,11 +213,9 @@ void setup() {
     Serial.println(WiFi.localIP());
   }
 
-  if (MDNS.begin(HOSTNAME)) {
-    Serial.printf("mDNS responder started: http://%s.local\n", HOSTNAME);
-    MDNS.addService("http", "tcp", 80);
-  } else {
-    Serial.println("Error starting mDNS");
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiUp = true;
+    startMdns();
   }
 
   server.on("/", handleRoot);
@@ -174,4 +231,5 @@ void setup() {
 // ---------- Loop ----------
 void loop() {
   server.handleClient();
+  ensureWifi();
 }
