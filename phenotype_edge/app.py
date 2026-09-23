@@ -12,7 +12,9 @@ from pydantic import BaseModel
 from . import camera_capture, dht_poller, video_stream
 from .config import settings
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+)
 logger = logging.getLogger("phenotype_edge.app")
 
 
@@ -58,28 +60,43 @@ async def relay_proxy(payload: RelayProxyIn):
         raise HTTPException(403, "Relay proxy disabled on this edge service instance")
 
     state_param = "on" if payload.state else "off"
+    host = settings.relay_host
     if payload.channel == "ac":
         inverted_state_param = "off" if payload.state else "on"
-        action_url = f"http://{settings.relay_host}/ac?state={inverted_state_param}"
+        action_url = f"http://{host}/ac?state={inverted_state_param}"
         confirm_key = "ac"
+    elif payload.channel == "exhaust":
+        if not settings.exhaust_fan_host:
+            raise HTTPException(
+                502, "EXHAUST_FAN_HOST is not configured on this edge service"
+            )
+        host = settings.exhaust_fan_host
+        ch = settings.exhaust_fan_channel
+        action_url = f"http://{host}/relay?ch={ch}&state={state_param}"
+        confirm_key = f"relay{ch}"
     else:
-        action_url = f"http://{settings.relay_host}/relay?ch={payload.channel}&state={state_param}"
+        action_url = f"http://{host}/relay?ch={payload.channel}&state={state_param}"
         confirm_key = f"relay{payload.channel}"
 
     try:
-        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=settings.request_timeout_seconds
+        ) as client:
             action_response = await client.get(action_url)
             action_response.raise_for_status()
-            status_response = await client.get(f"http://{settings.relay_host}/status")
+            status_response = await client.get(f"http://{host}/status")
             status_response.raise_for_status()
         body = status_response.json()
     except httpx.HTTPError as error:
-        raise HTTPException(502, f"Could not reach {settings.relay_host}: {error}")
+        raise HTTPException(502, f"Could not reach {host}: {error}")
     except ValueError:
-        raise HTTPException(502, f"{settings.relay_host} returned a non-JSON response")
+        raise HTTPException(502, f"{host} returned a non-JSON response")
 
     if confirm_key not in body:
-        raise HTTPException(502, f"{settings.relay_host}'s /status didn't include '{confirm_key}': {body}")
+        raise HTTPException(
+            502,
+            f"{host}'s /status didn't include '{confirm_key}': {body}",
+        )
 
     confirmed_state = body[confirm_key]
     if payload.channel == "ac":

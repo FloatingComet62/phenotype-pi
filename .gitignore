@@ -223,3 +223,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local build artefacts and per-machine secrets
+compile_commands.json
+src/secrets.h

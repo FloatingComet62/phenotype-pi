@@ -1,16 +1,17 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266WebServer.h>
+#include "../secrets.h"
 
 #define INSIDE_HOSTEL
 
 const char* HOSTNAME      = "stack1";
 #ifdef INSIDE_HOSTEL
-const char* WIFI_SSID     = "EACCESS";
-const char* WIFI_PASSWORD = "hostelnet";
+const char* WIFI_SSID     = WIFI_SSID_HOSTEL;
+const char* WIFI_PASSWORD = WIFI_PASSWORD_HOSTEL;
 #else
-const char* WIFI_SSID     = "Home_CR";
-const char* WIFI_PASSWORD = "sillyputty";
+const char* WIFI_SSID     = WIFI_SSID_HOME;
+const char* WIFI_PASSWORD = WIFI_PASSWORD_HOME;
 #endif
 
 ESP8266WebServer server(80);

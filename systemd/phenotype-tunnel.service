@@ -1,0 +1,20 @@
+[Unit]
+Description=Reverse SSH tunnel: expose this Pi's :8090 relay proxy to the phenotype VPS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=phenotype
+# Binds on the VPS's docker bridge address only, so the API container reaches it as
+# host.docker.internal:18090 and nothing on the public interface can.
+ExecStart=/usr/bin/ssh -NT \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+  -i /home/phenotype/.ssh/id_ed25519_tunnel -p 5726 \
+  -R 172.17.0.1:18090:127.0.0.1:8090 i2k2-admin@103.25.130.37
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

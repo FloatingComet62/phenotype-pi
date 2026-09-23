@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # --- Main backend (on psi, reached over Tailscale) ---
     main_backend_url: str = "http://100.75.13.45:8000/api/v1"
-    ingest_api_key: str = "myapikeyforeg"  # must match the main backend's INGEST_API_KEY
+    ingest_api_key: str = (
+        "myapikeyforeg"  # must match the main backend's INGEST_API_KEY
+    )
 
     # --- DHT sensor polling ---
     # Comma-separated mDNS hostnames, each expected to respond to a GET
@@ -24,9 +26,11 @@ class Settings(BaseSettings):
     # not the hostname itself.
 
     # --- Camera capture (periodic stills, not live video) ---
-    camera_enabled: bool =True
+    camera_enabled: bool = True
     camera_id: int = 1  # must match a camera already registered in the main backend
-    camera_backend: str = "picamera2"  # "picamera2" (Pi Camera Module) | "usb" (OpenCV) | "none"
+    camera_backend: str = (
+        "picamera2"  # "picamera2" (Pi Camera Module) | "usb" (OpenCV) | "none"
+    )
     camera_device_index: int = 0  # only used when camera_backend=usb
     # capture_interval_seconds: float = 17280.0  # 5x/day (24h / 5) -- matches the CV pipeline's intended cadence
     capture_interval_seconds: float = 15 * 60
@@ -36,6 +40,12 @@ class Settings(BaseSettings):
     # Must match HOSTNAME in esp32_relay.ino -- the firmware as shipped
     # uses "esp32-relay" (-> esp32-relay.local), not "relay".
     relay_host: str = "relay.local"
+    # The exhaust fan hangs off an SSR on the Zone 1 sensor board (esp32_dht
+    # firmware, GET /relay?ch=N), not the 4-channel relay. Channel "exhaust"
+    # on /relay-proxy goes there instead. Empty host = not wired.
+    # ponytail: one named channel; a host map if a second SSR appears.
+    exhaust_fan_host: str = ""
+    exhaust_fan_channel: str = "1"
     listen_host: str = "0.0.0.0"
     listen_port: int = 8090
 
