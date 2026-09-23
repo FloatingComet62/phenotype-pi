@@ -32,7 +32,7 @@ Data flows one way and commands flow the other:
 
 1. **Readings (room → cloud).** Every 60 s the edge service GETs `/reading` on each board in `DHT_HOSTS`, in order. Position *n* in that list is **Zone n**. It resolves the sensor ids by the exact names `Zone n Temperature` and `Zone n Humidity` from the backend's `GET /sensors`, then POSTs a batch to `/ingest/sensor-readings/batch` with the `X-API-Key` header. The backend fans each reading out over its websocket, which is how the dashboard updates live.
 2. **Camera (room → cloud).** Five stills a day from the Pi camera go to `/ingest/camera-capture`. The backend runs its CV pipeline on each one.
-3. **Commands (cloud → room).** A toggle on the dashboard becomes `POST /v2/actuators/{id}/toggle` on the backend. If that actuator has a relay binding, the backend POSTs `{"channel": ..., "state": ...}` to the Pi's `/relay-proxy`. The Pi cannot be reached from the internet, so it keeps a reverse SSH tunnel open to the VPS; the backend container sees the Pi's port 8090 as `host.docker.internal:18090`. The Pi then GETs the right board, re-reads its `/status`, and answers with the confirmed state. The backend only flips its own state on a confirmed answer, and shows the error inline otherwise.
+3. **Commands (cloud → room).** Today that is **AC 1** (channel `ac` on the relay board) and the **exhaust fan** (channel `exhaust` on dht1); Lights 1-4 use channels `1`-`4`. A toggle on the dashboard becomes `POST /v2/actuators/{id}/toggle` on the backend. If that actuator has a relay binding, the backend POSTs `{"channel": ..., "state": ...}` to the Pi's `/relay-proxy`. The Pi cannot be reached from the internet, so it keeps a reverse SSH tunnel open to the VPS; the backend container sees the Pi's port 8090 as `host.docker.internal:18090`. The Pi then GETs the right board, re-reads its `/status`, and answers with the confirmed state. The backend only flips its own state on a confirmed answer, and shows the error inline otherwise.
 
 Nothing in the room talks to the internet except the Pi. The boards are plain HTTP servers on the LAN with no authentication; the Pi is the only intended client.
 
@@ -44,13 +44,13 @@ Nothing in the room talks to the internet except the Pi. The boards are plain HT
 | Zone 2 | dht2 | 192.168.8.199 | 0c:b8:15:75:b4:70 | `esp32_dht2` | no SSR |
 | Zone 3 | dht3 | 192.168.8.198 | 08:a6:f7:b1:39:48 | `esp32_dht3` | no SSR |
 | Zone 4 | dht4 | 192.168.8.193 | 38:3e:51:6f:2b:e4 | `esp32_dht4` | SSR code present, nothing wired |
-| relay | relay | 192.168.8.200 | | `esp32_relay` (older build) | Lights 1-4 + AC |
+| relay | relay | 192.168.8.200 | | `esp32_relay` (identical to `esp32_relay/esp32_relay.ino`) | Relays 1-4 on GPIO 16/17/18/19 = Lights 1-4; GPIO 23 = AC, wired inverted, the Pi compensates |
 
 On the Pi (`phenotype@pi`, reachable as `ssh pi.apsdev.in` through the Cloudflare tunnel):
 
 - edge service checkout: `~/phenotype-pi-new` (this repo), venv built with uv, unit `phenotype-edge.service`
 - tunnel: `phenotype-tunnel.service`, key `~/.ssh/id_ed25519_tunnel`
-- `DHT_HOSTS` lists the four boards **by IP**, because the Pi resolves the boards' mDNS names only intermittently while HTTP by IP is reliable
+- `DHT_HOSTS`, `RELAY_HOST` and `EXHAUST_FAN_HOST` all name boards **by IP**, because the Pi takes up to 10 s to resolve a board's mDNS name (or fails outright) while HTTP by IP answers in milliseconds. A slow lookup here is what made every dashboard toggle report "timed out".
 - `/etc/hosts` pins the backend hostname to its IP, because the room router's DNS takes 5-15 s per lookup and the poller gives up at 5 s
 
 On the VPS (`ssh -p 5726 i2k2-admin@103.25.130.37`): `/opt/phenotype` holds a plain copy of the backend, built with `docker compose up -d --build api`. `/etc/ssh/sshd_config.d/phenotype-tunnel.conf` sets `GatewayPorts clientspecified`, and ufw allows Docker subnets to reach `172.17.0.1:18090`.
@@ -161,7 +161,7 @@ The committed unit assumes `/home/pi/phenotype` and user `pi`. The live Pi uses 
 | DHT_TEMP_FIELD / DHT_HUMIDITY_FIELD | temperature_c / humidity_percent | Preferred JSON keys; `temp_c`, `temperature`, `humidity`, `humidity_pct` are accepted too. |
 | CAMERA_ENABLED, CAMERA_ID, CAMERA_BACKEND, CAMERA_DEVICE_INDEX, CAPTURE_INTERVAL_SECONDS | true, 1, picamera2, 0, 17280 | Periodic stills. 8640 s = 10/day is what runs today. |
 | RELAY_PROXY_ENABLED | true | Enables `POST /relay-proxy`. |
-| RELAY_HOST | relay.local | The 4-channel relay board. |
+| RELAY_HOST | relay.local | The 4-channel relay board. Use its IP (`192.168.8.200`). |
 | EXHAUST_FAN_HOST | *(empty)* | Board whose SSR drives the exhaust fan (`192.168.8.195`). Empty means channel `exhaust` returns 502. |
 | EXHAUST_FAN_CHANNEL | 1 | SSR channel on that board. |
 | REQUEST_TIMEOUT_SECONDS | 8 | For board, relay and ingest requests. |
