@@ -18,7 +18,6 @@ logging.basicConfig(
 logger = logging.getLogger("phenotype_edge.app")
 
 
-@asynccontextmanager
 async def relay_keepalive():
     """GET the relay board's /status once a minute.
 
@@ -37,6 +36,7 @@ async def relay_keepalive():
         await asyncio.sleep(60)
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     background_tasks = [
         asyncio.create_task(dht_poller.run_forever()),
