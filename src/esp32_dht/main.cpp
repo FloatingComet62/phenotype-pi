@@ -4,6 +4,7 @@
 #include <WebServer.h>
 #include <Wire.h>
 #include "../secrets.h"
+#include <Preferences.h>
 
 // ---------- Config ----------
 const char* WIFI_SSID = WIFI_SSID_HOME;
@@ -24,6 +25,7 @@ const int SSR_PINS[2] = {25, 26};
 #define SSR_ON  HIGH
 #define SSR_OFF LOW
 bool ssrState[2] = {false, false};
+Preferences prefs;  // SSR state survives a reboot (see watchdog below)
 #endif
 
 WebServer server(80);
@@ -88,6 +90,24 @@ void updateSensor() {
   successCount++;
 }
 
+// ---------- No-request watchdog ----------
+// The Pi polls /reading every 60 s. A board that has served nothing for
+// 5 min while believing it is online is wedged (we have seen boards answer
+// ARP but not TCP for many minutes); a reboot is the only remote fix.
+// Outputs are restored from flash at boot so the reboot is invisible.
+unsigned long lastServed = 0;
+const unsigned long SERVE_TIMEOUT = 5UL * 60UL * 1000UL;
+
+void touchServed() { lastServed = millis(); }
+
+void checkWatchdog() {
+  if (millis() - lastServed > SERVE_TIMEOUT) {
+    Serial.println("no HTTP request served in 5 min, rebooting");
+    delay(100);
+    ESP.restart();
+  }
+}
+
 // ---------- Wi-Fi keepalive ----------
 // The ESP32 core auto-reconnects the link, but the mDNS responder stays dead
 // after a drop, so the board keeps its IP yet stops answering to dht1.local.
@@ -128,6 +148,7 @@ void setSsr(int idx, bool on) {
   if (idx < 0 || idx > 1) return;
   ssrState[idx] = on;
   digitalWrite(SSR_PINS[idx], on ? SSR_ON : SSR_OFF);
+  prefs.putUChar("ssr", (ssrState[0] ? 1 : 0) | (ssrState[1] ? 2 : 0));
 }
 
 String ssrJson() {
@@ -137,6 +158,7 @@ String ssrJson() {
 
 // GET /relay?ch=1|2&state=on|off  (same shape as the esp32_relay board)
 void handleRelay() {
+  touchServed();
   if (!server.hasArg("ch") || !server.hasArg("state")) {
     server.send(400, "application/json", "{\"error\":\"missing ch or state param\"}");
     return;
@@ -157,6 +179,7 @@ void handleRelay() {
 }
 
 void handleStatus() {
+  touchServed();
   server.send(200, "application/json", ssrJson());
 }
 
@@ -164,6 +187,7 @@ void handleStatus() {
 
 // ---------- Handlers ----------
 void handleReading() {
+  touchServed();
   if (isnan(lastTemp) || isnan(lastHum)) {
     server.send(503, "application/json", "{\"error\":\"No valid reading yet\"}");
     return;
@@ -178,6 +202,7 @@ void handleReading() {
 }
 
 void handleRoot() {
+  touchServed();
   server.send(200, "text/plain",
 #ifdef NO_SSR
     "ESP32 SHT20 node.\nGET /reading");
@@ -200,6 +225,14 @@ void setup() {
     digitalWrite(SSR_PINS[i], SSR_OFF);
     pinMode(SSR_PINS[i], OUTPUT);
   }
+  // ...then restored to the last commanded state.
+  prefs.begin("dht", false);
+  uint8_t bits = prefs.getUChar("ssr", 0);
+  for (int i = 0; i < 2; i++) {
+    ssrState[i] = bits & (1 << i);
+    digitalWrite(SSR_PINS[i], ssrState[i] ? SSR_ON : SSR_OFF);
+  }
+  Serial.printf("restored SSR 0x%02x\n", bits);
 #endif
   
   // Boards have been wired to either SDA/SCL pair; probe for the SHT20 (0x40)
@@ -229,6 +262,7 @@ void setup() {
   WiFi.setHostname(HOSTNAME);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
+  WiFi.setSleep(false);  // modem sleep makes some APs drop unicast to this board
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   Serial.print("Connecting to WiFi");
@@ -261,6 +295,7 @@ void setup() {
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("HTTP server started");
+  touchServed();
 
   delay(2000);
   updateSensor();
@@ -271,4 +306,5 @@ void loop() {
   server.handleClient();
   updateSensor();
   ensureWifi();
+  checkWatchdog();
 }

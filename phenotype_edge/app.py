@@ -19,8 +19,29 @@ logger = logging.getLogger("phenotype_edge.app")
 
 
 @asynccontextmanager
+async def relay_keepalive():
+    """GET the relay board's /status once a minute.
+
+    The relay firmware reboots itself after five minutes without serving a
+    request (its way out of the wedged-but-associated state we keep seeing).
+    Nothing else talks to that board routinely, so this is what keeps a
+    healthy board from rebooting. Failures are logged and ignored.
+    """
+    while True:
+        if settings.relay_proxy_enabled and settings.relay_host:
+            try:
+                async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+                    await client.get(f"http://{settings.relay_host}/status")
+            except httpx.HTTPError as error:
+                logger.warning("relay keepalive: %s unreachable (%s)", settings.relay_host, error)
+        await asyncio.sleep(60)
+
+
 async def lifespan(app: FastAPI):
-    background_tasks = [asyncio.create_task(dht_poller.run_forever())]
+    background_tasks = [
+        asyncio.create_task(dht_poller.run_forever()),
+        asyncio.create_task(relay_keepalive()),
+    ]
     if settings.camera_enabled:
         background_tasks.append(asyncio.create_task(camera_capture.run_forever()))
     logger.info(

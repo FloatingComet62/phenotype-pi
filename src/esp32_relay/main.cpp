@@ -50,6 +50,23 @@ void setAC(bool on) {
   saveStates();
 }
 
+// ---------- No-request watchdog (same as the sensor boards) ----------
+// The Pi's edge service GETs /status every minute (relay keepalive), so
+// five silent minutes means the board is wedged. Outputs are restored
+// from flash after the reboot.
+unsigned long lastServed = 0;
+const unsigned long SERVE_TIMEOUT = 5UL * 60UL * 1000UL;
+
+void touchServed() { lastServed = millis(); }
+
+void checkWatchdog() {
+  if (millis() - lastServed > SERVE_TIMEOUT) {
+    Serial.println("no HTTP request served in 5 min, rebooting");
+    delay(100);
+    ESP.restart();
+  }
+}
+
 // ---------- Wi-Fi keepalive (same as the sensor boards) ----------
 bool wifiUp = false;
 unsigned long lastWifiCheck = 0;
@@ -93,6 +110,7 @@ String statusJson() {
 
 // ---------- Handlers ----------
 void handleRoot() {
+  touchServed();
   server.send(200, "text/plain",
     "ESP32 4-channel relay + AC control server.\n"
     "GET /relay?ch=1&state=on   (ch = 1-4, state = on/off)\n"
@@ -102,6 +120,7 @@ void handleRoot() {
 }
 
 void handleRelay() {
+  touchServed();
   if (!server.hasArg("ch") || !server.hasArg("state")) {
     server.send(400, "application/json", "{\"error\":\"missing ch or state param\"}");
     return;
@@ -125,6 +144,7 @@ void handleRelay() {
 }
 
 void handleAll() {
+  touchServed();
   if (!server.hasArg("state")) {
     server.send(400, "application/json", "{\"error\":\"missing state param\"}");
     return;
@@ -142,6 +162,7 @@ void handleAll() {
 }
 
 void handleAC() {
+  touchServed();
   if (!server.hasArg("state")) {
     server.send(400, "application/json", "{\"error\":\"missing state param\"}");
     return;
@@ -158,6 +179,7 @@ void handleAC() {
 }
 
 void handleStatus() {
+  touchServed();
   server.send(200, "application/json", statusJson());
 }
 
@@ -226,10 +248,12 @@ void setup() {
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("HTTP server started");
+  touchServed();
 }
 
 // ---------- Loop ----------
 void loop() {
   server.handleClient();
   ensureWifi();
+  checkWatchdog();
 }
