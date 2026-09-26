@@ -15,6 +15,7 @@ import logging
 import httpx
 
 from .config import settings
+from .resolve import forget, resolve
 
 logger = logging.getLogger("dht_poller")
 
@@ -75,12 +76,14 @@ def _first_present(data: dict, configured: str, aliases: tuple[str, ...]):
 
 
 async def poll_one_host(client: httpx.AsyncClient, host: str) -> dict | None:
+    addr = await resolve(host)
     try:
-        resp = await client.get(f"http://{host}{settings.dht_reading_path}", timeout=settings.request_timeout_seconds)
+        resp = await client.get(f"http://{addr}{settings.dht_reading_path}", timeout=settings.request_timeout_seconds)
         resp.raise_for_status()
         return resp.json()
     except (httpx.HTTPError, ValueError) as e:
-        logger.warning("Failed to read %s%s: %s", host, settings.dht_reading_path, e)
+        logger.warning("Failed to read %s (%s)%s: %s", host, addr, settings.dht_reading_path, e)
+        forget(host)
         return None
 async def poll_once(client: httpx.AsyncClient) -> bool:
     """Returns True if the backend reported dropped/unknown sensor IDs

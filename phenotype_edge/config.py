@@ -46,6 +46,19 @@ class Settings(BaseSettings):
     # ponytail: one named channel; a host map if a second SSR appears.
     exhaust_fan_host: str = ""
     exhaust_fan_channel: str = "1"
+    # name=mac,name=mac ... Second lookup for boards whose mDNS responder
+    # has died (ESP32s do this) but that still answer HTTP: the resolver
+    # finds the MAC in this Pi's ARP table, sweeping the subnet if needed.
+    board_macs: str = ""
+
+    @property
+    def board_mac_map(self) -> dict[str, str]:
+        out = {}
+        for item in self.board_macs.split(","):
+            if "=" in item:
+                name, mac = item.split("=", 1)
+                out[name.strip().lower()] = mac.strip().lower()
+        return out
     listen_host: str = "0.0.0.0"
     listen_port: int = 8090
 

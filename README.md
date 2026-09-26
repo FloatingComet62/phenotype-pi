@@ -36,21 +36,21 @@ Data flows one way and commands flow the other:
 
 Nothing in the room talks to the internet except the Pi. The boards are plain HTTP servers on the LAN with no authentication; the Pi is the only intended client.
 
-## 2. What is deployed right now (23 Sep 2026)
+## 2. What is deployed right now (26 Sep 2026)
 
 | Board | Hostname | IP | MAC | Firmware env | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Zone 1 | dht1 | 192.168.8.195 | 38:3e:51:6f:45:a8 | `esp32_dht` | SSR ch1 (GPIO 25) drives the exhaust fan. Drops off Wi-Fi for minutes at a time; see §8. |
-| Zone 2 | dht2 | 192.168.8.199 | 0c:b8:15:75:b4:70 | `esp32_dht2` | no SSR |
-| Zone 3 | dht3 | 192.168.8.198 | 08:a6:f7:b1:39:48 | `esp32_dht3` | no SSR |
-| Zone 4 | dht4 | 192.168.8.193 | 38:3e:51:6f:2b:e4 | `esp32_dht4` | SSR code present, nothing wired |
-| relay | relay | 192.168.8.200 | | `esp32_relay` (identical to `esp32_relay/esp32_relay.ino`) | Relays 1-4 on GPIO 16/17/18/19 = Lights 1-4; GPIO 23 = AC, wired inverted, the Pi compensates |
+| Zone 1 | dht1 | 192.168.8.198 (was .195 until 25 Sep) | 38:3e:51:6f:45:a8 | `esp32_dht` | SSR ch1 (GPIO 25) drives the exhaust fan. Drops off Wi-Fi for minutes at a time; see §8. |
+| Zone 2 | dht2 | 192.168.8.200 | 0c:b8:15:75:b4:70 | `esp32_dht2` | no SSR |
+| Zone 3 | dht3 | 192.168.8.197 | 08:a6:f7:b1:39:48 | `esp32_dht3` | no SSR |
+| Zone 4 | dht4 | 192.168.8.199 | 38:3e:51:6f:2b:e4 | `esp32_dht4` | SSR code present, nothing wired |
+| relay | relay | 192.168.8.196 | | `esp32_relay` (identical to `esp32_relay/esp32_relay.ino`) | Relays 1-4 on GPIO 16/17/18/19 = Lights 1-4; GPIO 23 = AC, wired inverted, the Pi compensates |
 
 On the Pi (`phenotype@pi`, reachable as `ssh pi.apsdev.in` through the Cloudflare tunnel):
 
 - edge service checkout: `~/phenotype-pi-new` (this repo), venv built with uv, unit `phenotype-edge.service`
 - tunnel: `phenotype-tunnel.service`, key `~/.ssh/id_ed25519_tunnel`
-- `DHT_HOSTS`, `RELAY_HOST` and `EXHAUST_FAN_HOST` all name boards **by IP**, because the Pi takes up to 10 s to resolve a board's mDNS name (or fails outright) while HTTP by IP answers in milliseconds. A slow lookup here is what made every dashboard toggle report "timed out".
+- `DHT_HOSTS`, `RELAY_HOST` and `EXHAUST_FAN_HOST` name boards by their **mDNS names** (`dht1.local` ...). The edge service resolves them itself (`phenotype_edge/resolve.py`): first from Avahi's service-browse cache, then by looking the board's MAC (`BOARD_MACS`) up in the Pi's ARP table, sweeping the subnet if needed. It never does a unicast `.local` query, which from this Pi takes 5-10 s or fails. IPs in `.env` broke the whole room on 25 Sep when the router restarted and re-dealt every lease.
 - `/etc/hosts` pins the backend hostname to its IP, because the room router's DNS takes 5-15 s per lookup and the poller gives up at 5 s
 
 On the VPS (`ssh -p 5726 i2k2-admin@103.25.130.37`): `/opt/phenotype` holds a plain copy of the backend, built with `docker compose up -d --build api`. `/etc/ssh/sshd_config.d/phenotype-tunnel.conf` sets `GatewayPorts clientspecified`, and ufw allows Docker subnets to reach `172.17.0.1:18090`.
@@ -155,14 +155,15 @@ The committed unit assumes `/home/pi/phenotype` and user `pi`. The live Pi uses 
 | --- | --- | --- |
 | MAIN_BACKEND_URL | deployment-specific | Backend API base, e.g. `https://phenotype.103-25-130-37.nip.io/api/v1`. |
 | INGEST_API_KEY | deployment-specific | `X-API-Key` for the two ingest routes. Must match the backend's. |
-| DHT_HOSTS | dht1.local,dht2.local,dht3.local | Boards to poll, in zone order. **Use IPs** until the router has DHCP reservations and the Pi resolves `.local` names reliably. |
+| DHT_HOSTS | dht1.local,dht2.local,dht3.local | Boards to poll, in zone order. Use `.local` names; the service resolves them (see §2). |
+| BOARD_MACS | *(empty)* | `name=mac,...` for every board. Lets the resolver find a board whose mDNS responder has died. |
 | DHT_POLL_INTERVAL_SECONDS | 60 | |
 | DHT_READING_PATH | /reading | |
 | DHT_TEMP_FIELD / DHT_HUMIDITY_FIELD | temperature_c / humidity_percent | Preferred JSON keys; `temp_c`, `temperature`, `humidity`, `humidity_pct` are accepted too. |
 | CAMERA_ENABLED, CAMERA_ID, CAMERA_BACKEND, CAMERA_DEVICE_INDEX, CAPTURE_INTERVAL_SECONDS | true, 1, picamera2, 0, 17280 | Periodic stills. 8640 s = 10/day is what runs today. |
 | RELAY_PROXY_ENABLED | true | Enables `POST /relay-proxy`. |
-| RELAY_HOST | relay.local | The 4-channel relay board. Use its IP (`192.168.8.200`). |
-| EXHAUST_FAN_HOST | *(empty)* | Board whose SSR drives the exhaust fan (`192.168.8.195`). Empty means channel `exhaust` returns 502. |
+| RELAY_HOST | relay.local | The 4-channel relay board. |
+| EXHAUST_FAN_HOST | *(empty)* | Board whose SSR drives the exhaust fan (`dht1.local`). Empty means channel `exhaust` returns 502. |
 | EXHAUST_FAN_CHANNEL | 1 | SSR channel on that board. |
 | REQUEST_TIMEOUT_SECONDS | 8 | For board, relay and ingest requests. |
 
@@ -247,7 +248,8 @@ docker exec phenotype_api python -c "import urllib.request;print(urllib.request.
 Symptoms we have seen and what they meant:
 
 - **Dashboard toggle says "Edge service at http://host.docker.internal:18090 timed out".** Either the tunnel is down (check the Pi unit) or the board behind that channel is off the network (curl it by IP from the Pi). The backend keeps the old state and shows the error inline.
-- **A zone goes stale while its board answers `curl` by IP.** Name resolution. Put the IP in `DHT_HOSTS`.
+- **A zone goes stale while its board answers `curl` by IP.** The board's mDNS responder has died (they do, after a Wi-Fi hiccup) and its MAC is missing from `BOARD_MACS`. Add it; the resolver logs `found by MAC` when the fallback is doing the work.
+- **Every zone and the AC fail at once after a power cut.** The router re-dealt DHCP leases. With names in `.env` this now heals itself within a poll cycle; with IPs it does not.
 - **`Failed to read .../reading: 503`.** The board is up but its SHT20 is not answering: wrong pins or a dead sensor. The serial banner says which pin pair it found, if any.
 - **Board unreachable for minutes, then back.** dht1 does this. Suspect its supply or its position relative to the access point; the other three boards on the same firmware do not drop.
 - **All zones offline, `phenotype-edge` in a restart loop with `203/EXEC`.** The unit points at a path that no longer exists. Fix `ExecStart`.
@@ -257,7 +259,7 @@ Symptoms we have seen and what they meant:
 
 In rough priority order:
 
-1. **DHCP reservations on the room router** for the four sensor boards and the relay board, so the IP list in `DHT_HOSTS` and `EXHAUST_FAN_HOST` can never go stale. Until then, if a board moves, the zone shows stale and the fix is one line in `.env` plus a restart.
+1. **DHCP reservations on the room router** for the five boards. The resolver copes with moving addresses now, but reservations make its MAC sweep unnecessary and keep the IP table in §2 true.
 2. **Make dht1 stay up.** It drives the fan, so it matters most. Check its power supply and Wi-Fi signal; if it still drops, move the SSR to dht4 (already has the firmware, spare channel wired to GPIO 25) and point `EXHAUST_FAN_HOST` there.
 3. **A proper hostname for the backend** (an A record such as `phenotype-api.<yourdomain>` → 103.25.130.37) instead of nip.io, which some networks block by SNI. Update Caddy, the Pi's `.env` and `/etc/hosts`, and the dashboard's `VITE_API_BASE`.
 4. **Reflash the relay board** with `src/esp32_relay` so it gets the same reconnect logic as the sensor boards. Decide on the hostname (`relay` vs `esp32-relay`) and set `RELAY_HOST` to match.

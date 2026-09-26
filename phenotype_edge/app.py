@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from . import camera_capture, dht_poller, video_stream
 from .config import settings
+from .resolve import forget, resolve
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -29,10 +30,12 @@ async def relay_keepalive():
     while True:
         if settings.relay_proxy_enabled and settings.relay_host:
             try:
+                addr = await resolve(settings.relay_host)
                 async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
-                    await client.get(f"http://{settings.relay_host}/status")
+                    await client.get(f"http://{addr}/status")
             except httpx.HTTPError as error:
                 logger.warning("relay keepalive: %s unreachable (%s)", settings.relay_host, error)
+                forget(settings.relay_host)
         await asyncio.sleep(60)
 
 
@@ -81,7 +84,7 @@ async def relay_proxy(payload: RelayProxyIn):
         raise HTTPException(403, "Relay proxy disabled on this edge service instance")
 
     state_param = "on" if payload.state else "off"
-    host = settings.relay_host
+    host = await resolve(settings.relay_host)
     if payload.channel == "ac":
         inverted_state_param = "off" if payload.state else "on"
         action_url = f"http://{host}/ac?state={inverted_state_param}"
@@ -91,7 +94,7 @@ async def relay_proxy(payload: RelayProxyIn):
             raise HTTPException(
                 502, "EXHAUST_FAN_HOST is not configured on this edge service"
             )
-        host = settings.exhaust_fan_host
+        host = await resolve(settings.exhaust_fan_host)
         ch = settings.exhaust_fan_channel
         action_url = f"http://{host}/relay?ch={ch}&state={state_param}"
         confirm_key = f"relay{ch}"
@@ -109,6 +112,8 @@ async def relay_proxy(payload: RelayProxyIn):
             status_response.raise_for_status()
         body = status_response.json()
     except httpx.HTTPError as error:
+        forget(settings.relay_host)
+        forget(settings.exhaust_fan_host)
         raise HTTPException(502, f"Could not reach {host}: {error}")
     except ValueError:
         raise HTTPException(502, f"{host} returned a non-JSON response")
