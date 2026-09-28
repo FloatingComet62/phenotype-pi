@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     # ponytail: one named channel; a host map if a second SSR appears.
     exhaust_fan_host: str = ""
     exhaust_fan_channel: str = "1"
+    # Second AC: the /ac output on a sensor board (dht4). Active high, not
+    # inverted. Channel "ac2" on /relay-proxy. Empty host = not wired.
+    ac2_host: str = ""
+    # Water valves on the relay board. Relay VALVE_MASTER_CHANNEL is the
+    # master valve: no branch gets water unless it is open too. Channels
+    # "valve1".."valve3" on /relay-proxy drive relay 1..3 and handle the
+    # master themselves. Empty = valve channels disabled.
+    valve_master_channel: str = ""
     # name=mac,name=mac ... Second lookup for boards whose mDNS responder
     # has died (ESP32s do this) but that still answer HTTP: the resolver
     # finds the MAC in this Pi's ARP table, sweeping the subnet if needed.

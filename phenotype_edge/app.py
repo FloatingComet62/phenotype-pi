@@ -78,42 +78,90 @@ async def health():
     }
 
 
+def _client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=settings.request_timeout_seconds)
+
+
+async def _get_json(client: httpx.AsyncClient, url: str) -> dict:
+    response = await client.get(url)
+    response.raise_for_status()
+    return response.json()
+
+
+async def _switch_valve(client, host: str, branch: str, want: bool) -> dict:
+    """Open or close one branch valve, taking the master valve with it.
+
+    Opening: master first, then the branch. Closing: the branch, then the
+    master unless another branch is still open. Returns the board's final
+    /status.
+    """
+    master = settings.valve_master_channel
+    state = "on" if want else "off"
+    if want:
+        await _get_json(client, f"http://{host}/relay?ch={master}&state=on")
+    body = await _get_json(client, f"http://{host}/relay?ch={branch}&state={state}")
+    if not want:
+        others_open = any(
+            on
+            for key, on in body.items()
+            if key.startswith("relay") and key not in (f"relay{master}", f"relay{branch}")
+        )
+        if not others_open:
+            await _get_json(client, f"http://{host}/relay?ch={master}&state=off")
+    return await _get_json(client, f"http://{host}/status")
+
+
 @app.post("/relay-proxy")
 async def relay_proxy(payload: RelayProxyIn):
+    """channel: "1".."4" raw relay | "ac" | "ac2" | "exhaust" | "valve1".."valve3"."""
     if not settings.relay_proxy_enabled:
         raise HTTPException(403, "Relay proxy disabled on this edge service instance")
 
-    state_param = "on" if payload.state else "off"
-    host = await resolve(settings.relay_host)
-    if payload.channel == "ac":
-        inverted_state_param = "off" if payload.state else "on"
-        action_url = f"http://{host}/ac?state={inverted_state_param}"
-        confirm_key = "ac"
-    elif payload.channel == "exhaust":
+    channel, want = payload.channel, payload.state
+    state = "on" if want else "off"
+    invert = False
+    valve = None
+    host_setting = settings.relay_host
+
+    if channel == "ac":
+        # Wired inverted on the relay board: output released = AC running.
+        invert = True
+        path, confirm_key = f"/ac?state={'off' if want else 'on'}", "ac"
+    elif channel == "ac2":
+        if not settings.ac2_host:
+            raise HTTPException(502, "AC2_HOST is not configured on this edge service")
+        host_setting = settings.ac2_host
+        path, confirm_key = f"/ac?state={state}", "ac"
+    elif channel == "exhaust":
         if not settings.exhaust_fan_host:
             raise HTTPException(
                 502, "EXHAUST_FAN_HOST is not configured on this edge service"
             )
-        host = await resolve(settings.exhaust_fan_host)
+        host_setting = settings.exhaust_fan_host
         ch = settings.exhaust_fan_channel
-        action_url = f"http://{host}/relay?ch={ch}&state={state_param}"
-        confirm_key = f"relay{ch}"
+        path, confirm_key = f"/relay?ch={ch}&state={state}", f"relay{ch}"
+    elif channel.startswith("valve"):
+        valve = channel[len("valve"):]
+        if not settings.valve_master_channel:
+            raise HTTPException(
+                502, "VALVE_MASTER_CHANNEL is not configured on this edge service"
+            )
+        if not valve.isdigit() or valve == settings.valve_master_channel:
+            raise HTTPException(400, f"'{channel}' is not a branch valve")
+        path, confirm_key = None, f"relay{valve}"
     else:
-        action_url = f"http://{host}/relay?ch={payload.channel}&state={state_param}"
-        confirm_key = f"relay{payload.channel}"
+        path, confirm_key = f"/relay?ch={channel}&state={state}", f"relay{channel}"
 
+    host = await resolve(host_setting)
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.request_timeout_seconds
-        ) as client:
-            action_response = await client.get(action_url)
-            action_response.raise_for_status()
-            status_response = await client.get(f"http://{host}/status")
-            status_response.raise_for_status()
-        body = status_response.json()
+        async with _client() as client:
+            if valve is not None:
+                body = await _switch_valve(client, host, valve, want)
+            else:
+                await _get_json(client, f"http://{host}{path}")
+                body = await _get_json(client, f"http://{host}/status")
     except httpx.HTTPError as error:
-        forget(settings.relay_host)
-        forget(settings.exhaust_fan_host)
+        forget(host_setting)
         raise HTTPException(502, f"Could not reach {host}: {error}")
     except ValueError:
         raise HTTPException(502, f"{host} returned a non-JSON response")
@@ -124,14 +172,12 @@ async def relay_proxy(payload: RelayProxyIn):
             f"{host}'s /status didn't include '{confirm_key}': {body}",
         )
 
-    confirmed_state = body[confirm_key]
-    if payload.channel == "ac":
-        confirmed_state = not confirmed_state
-    return {
-        "ok": confirmed_state == payload.state,
-        "confirmed_state": confirmed_state,
-        "device_response": body,
-    }
+    confirmed_state = (not body[confirm_key]) if invert else body[confirm_key]
+    ok = confirmed_state == want
+    if valve is not None and want:
+        # An open branch is useless without the master.
+        ok = ok and bool(body.get(f"relay{settings.valve_master_channel}"))
+    return {"ok": ok, "confirmed_state": confirmed_state, "device_response": body}
 
 
 @app.get("/video")
