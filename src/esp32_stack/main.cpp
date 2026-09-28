@@ -283,6 +283,18 @@ void startMdns() {
   }
 }
 
+// Why the access point last dropped or refused us. The status code alone
+// (4, "connect failed") does not say; the reason does, e.g. 15 = wrong
+// password, 201 = network not found, 5 = access point full.
+uint8_t wifiReason = 0;
+
+void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event != ARDUINO_EVENT_WIFI_STA_DISCONNECTED) return;
+  wifiReason = info.wifi_sta_disconnected.reason;
+  Serial.printf("WiFi disconnected, reason %u (%s)\n", wifiReason,
+                WiFi.disconnectReasonName((wifi_err_reason_t)wifiReason));
+}
+
 void beginWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
@@ -373,6 +385,7 @@ String statusJson() {
   json += ",\"resends\":" + String(reasserts) + ",\"arduino_gaps\":" + String(arduinoGaps);
   json += ",\"lines_ok\":" + String(linesOk) + ",\"lines_bad\":" + String(linesBad);
   json += ",\"commands_sent\":" + String(commandsSent);
+  json += ",\"wifi_reason\":" + String(wifiReason);
   json += ",\"rssi\":" + String(WiFi.RSSI());
   json += ",\"uptime_s\":" + String(millis() / 1000);
   json += ",\"restarts\":" + String(restarts) + "}";
@@ -504,6 +517,7 @@ void setup() {
   Serial.printf("consecutive self-restarts: %u\n", restarts);
   loadDesired();
 
+  WiFi.onEvent(onWifiEvent);
   beginWifi();
   Serial.print("Connecting to WiFi");
   for (int attempts = 0; WiFi.status() != WL_CONNECTED && attempts < 40; attempts++) {
