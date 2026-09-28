@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Stack bridges in stack order: position n is stack n. POST /stack-led
     # sends a row's colour to the right one.
     stack_hosts: str = ""
+    # PWM the pump runs at when it is switched on, 0-255. 128 is the speed
+    # the Arduino sketch itself starts the pump at. Off is always 0.
+    pump_on_speed: int = 128
 
     @property
     def board_mac_map(self) -> dict[str, str]:

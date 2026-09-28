@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import camera_capture, dht_poller, video_stream
+from . import camera_capture, dht_poller, stack_poller, video_stream
 from .config import settings
 from .resolve import forget, resolve
 from .stacks import brightness, led_segment, stack_host
@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
     background_tasks = [
         asyncio.create_task(dht_poller.run_forever()),
         asyncio.create_task(relay_keepalive()),
+        asyncio.create_task(stack_poller.run_forever()),
     ]
     if settings.camera_enabled:
         background_tasks.append(asyncio.create_task(camera_capture.run_forever()))
@@ -115,9 +116,38 @@ async def _switch_valve(client, host: str, branch: str, want: bool) -> dict:
     return await _get_json(client, f"http://{host}/status")
 
 
+async def _switch_pump(stack: str, want: bool) -> dict:
+    """Circulation pump of one stack, through its bridge."""
+    host_name = stack_host(settings.stack_hosts, int(stack)) if stack.isdigit() else None
+    if host_name is None:
+        raise HTTPException(404, f"Stack '{stack}' has no bridge in STACK_HOSTS")
+    speed = max(0, min(255, settings.pump_on_speed)) if want else 0
+    host = await resolve(host_name)
+    try:
+        async with _client() as client:
+            body = await _get_json(client, f"http://{host}/pump?speed={speed}")
+    except httpx.HTTPError as error:
+        forget(host_name)
+        raise HTTPException(502, f"Could not reach {host_name} ({host}): {error}")
+    except ValueError:
+        raise HTTPException(502, f"{host_name} returned a non-JSON response")
+    answer = {
+        "ok": body.get("pump_speed") == speed,
+        "confirmed_state": bool(body.get("pump_speed")),
+        "device_response": body,
+    }
+    if answer["ok"] and not body.get("arduino_online"):
+        answer["warning"] = (
+            f"Sent, but stack {stack}'s Arduino is not responding. "
+            "The pump is set when it comes back."
+        )
+    return answer
+
+
 @app.post("/relay-proxy")
 async def relay_proxy(payload: RelayProxyIn):
-    """channel: "1".."4" raw relay | "ac" | "ac2" | "exhaust" | "valve1".."valve3"."""
+    """channel: "1".."4" raw relay | "ac" | "ac2" | "exhaust" | "valve1".."valve3"
+    | "pump1".. (a stack's circulation pump)."""
     if not settings.relay_proxy_enabled:
         raise HTTPException(403, "Relay proxy disabled on this edge service instance")
 
@@ -144,6 +174,8 @@ async def relay_proxy(payload: RelayProxyIn):
         host_setting = settings.exhaust_fan_host
         ch = settings.exhaust_fan_channel
         path, confirm_key = f"/relay?ch={ch}&state={state}", f"relay{ch}"
+    elif channel.startswith("pump"):
+        return await _switch_pump(channel[len("pump"):], want)
     elif channel.startswith("valve"):
         valve = channel[len("valve"):]
         if not settings.valve_master_channel:
