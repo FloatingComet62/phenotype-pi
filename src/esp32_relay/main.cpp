@@ -1,4 +1,5 @@
-// Relay board: 4 relays + the AC output, as an HTTP server on the room Wi-Fi.
+// Relay board: 4 relays (water valves) + the AC output, as an HTTP server on
+// the room Wi-Fi.
 // The Pi's edge service is the only intended client (POST /relay-proxy there
 // becomes GET /relay, /ac and /status here).
 #include <Arduino.h>
@@ -14,7 +15,7 @@ const char* WIFI_SSID     = WIFI_SSID_HOME;
 const char* WIFI_PASSWORD = WIFI_PASSWORD_HOME;
 const char* HOSTNAME      = "relay";   // -> http://relay.local, matches RELAY_HOST on the Pi
 
-// 4-channel relay GPIOs — change to match your wiring
+// 4-channel relay GPIOs, one water valve each — change to match your wiring
 const int RELAY_PINS[4] = {16, 17, 18, 19};
 const int NUM_RELAYS = 4;
 
@@ -71,7 +72,9 @@ void setAC(bool on) {
 void restoreOutputs() {
   uint8_t bits = prefs.getUChar("out", 0);
   for (int i = 0; i <= NUM_RELAYS; i++) {
-    bool on = i < NUM_RELAYS ? bits & (1 << i) : bits & (1 << 7);
+    // Relays 1-4 drive water valves: they always start closed, whatever they
+    // were before the restart. Only the AC returns to its saved state.
+    bool on = i < NUM_RELAYS ? false : bits & (1 << 7);
     int pin = i < NUM_RELAYS ? RELAY_PINS[i] : AC_PIN;
     if (i < NUM_RELAYS) relayState[i] = on; else acState = on;
     // Level first, then drive the pin, then release any hold left by
