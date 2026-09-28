@@ -44,7 +44,7 @@ Nothing in the room talks to the internet except the Pi. The boards are plain HT
 | Zone 2 | dht2 | 192.168.8.200 | 0c:b8:15:75:b4:70 | `esp32_dht2` | no SSR |
 | Zone 3 | dht3 | 192.168.8.197 | 08:a6:f7:b1:39:48 | `esp32_dht3` | no SSR |
 | Zone 4 | dht4 | 192.168.8.199 | 38:3e:51:6f:2b:e4 | `esp32_dht4` | SSR code present, nothing wired |
-| relay | relay | 192.168.8.196 | c0:cd:d6:d0:04:64 | original sketch (`esp32_relay/esp32_relay.ino`); new `esp32_relay` build not flashed | Relays 1-4 on GPIO 16/17/18/19 = water valves; GPIO 23 = AC, wired inverted, the Pi compensates |
+| relay | relay | 192.168.8.196 | c0:cd:d6:d0:04:64 | `esp32_relay`, flashed 28 Sep (commit 9547fad) | Relays 1-4 on GPIO 16/17/18/19 = water valves; GPIO 23 = AC, wired inverted, the Pi compensates |
 
 On the Pi (`phenotype@pi`, reachable as `ssh pi.apsdev.in` through the Cloudflare tunnel):
 
@@ -133,7 +133,7 @@ Wi-Fi behaviour, in order of escalation:
 3. Down for 30 s: the Wi-Fi driver is shut down and started again.
 4. Down for 60 s, or no HTTP request served for 5 min: the chip restarts. The Pi GETs `/status` every minute, so a healthy board never hits the second rule.
 
-Because this board switches a compressor, restarts are rationed. Every restart that is not followed by a served request doubles both timeouts, up to 16x, so a router or Pi that is simply off costs a handful of restarts a day, not one a minute. The AC output is saved to flash and restored first thing at boot; the four valve relays always start closed, and the pads are latched (`gpio_hold_en`) across a planned restart so the relays should not click. **That last part has not been verified on the bench yet**: force a restart with the AC relay connected to nothing and listen.
+Because this board switches a compressor, restarts are rationed. Every restart that is not followed by a served request doubles both timeouts, up to 16x, so a router or Pi that is simply off costs a handful of restarts a day, not one a minute. The AC output is saved to flash and restored first thing at boot; the four valve relays always start closed, and the pads are latched (`gpio_hold_en`) across a planned restart so the relays should not click. **That last part has not been verified on the bench yet**: the board has not performed a self-restart since it was flashed on 28 Sep. Watch `restarts` in `/status`; the first time it is non-zero, check whether the AC blipped.
 
 `/status` also returns `rssi`, `uptime_s` and `restarts`, which is how to tell from the Pi whether a board is restarting itself and how good its link is.
 
