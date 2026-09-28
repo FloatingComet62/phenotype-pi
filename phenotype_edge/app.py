@@ -7,11 +7,12 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import camera_capture, dht_poller, video_stream
 from .config import settings
 from .resolve import forget, resolve
+from .stacks import brightness, led_segment, stack_host
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -20,22 +21,25 @@ logger = logging.getLogger("phenotype_edge.app")
 
 
 async def relay_keepalive():
-    """GET the relay board's /status once a minute.
+    """GET /status on the relay board and every KEEPALIVE_HOSTS board, once a minute.
 
-    The relay firmware reboots itself after five minutes without serving a
-    request (its way out of the wedged-but-associated state we keep seeing).
-    Nothing else talks to that board routinely, so this is what keeps a
-    healthy board from rebooting. Failures are logged and ignored.
+    Their firmware restarts itself after five minutes without serving a
+    request (its way out of the wedged-but-associated state). Nothing else
+    talks to these boards routinely, so this is what keeps a healthy one
+    from restarting. Failures are logged and ignored.
     """
     while True:
+        hosts = [h.strip() for h in settings.keepalive_hosts.split(",") if h.strip()]
         if settings.relay_proxy_enabled and settings.relay_host:
+            hosts.insert(0, settings.relay_host)
+        for host in hosts:
             try:
-                addr = await resolve(settings.relay_host)
+                addr = await resolve(host)
                 async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
                     await client.get(f"http://{addr}/status")
             except httpx.HTTPError as error:
-                logger.warning("relay keepalive: %s unreachable (%s)", settings.relay_host, error)
-                forget(settings.relay_host)
+                logger.warning("keepalive: %s unreachable (%s)", host, error)
+                forget(host)
         await asyncio.sleep(60)
 
 
@@ -178,6 +182,55 @@ async def relay_proxy(payload: RelayProxyIn):
         # An open branch is useless without the master.
         ok = ok and bool(body.get(f"relay{settings.valve_master_channel}"))
     return {"ok": ok, "confirmed_state": confirmed_state, "device_response": body}
+
+
+class StackLedIn(BaseModel):
+    stack: int
+    shelf: int
+    row: int
+    r: int = Field(ge=0, le=255)
+    g: int = Field(ge=0, le=255)
+    b: int = Field(ge=0, le=255)
+    intensity: int = Field(ge=0, le=100)
+
+
+@app.post("/stack-led")
+async def stack_led(payload: StackLedIn):
+    """Set one row's LEDs. The bridge passes it to the stack's Arduino.
+
+    `ok` means the bridge took the command. The Arduino never acknowledges,
+    so `arduino_online` (is it sending telemetry?) is the only evidence that
+    anyone was listening; the bridge sends the colour again when it returns.
+    """
+    host_name = stack_host(settings.stack_hosts, payload.stack)
+    if host_name is None:
+        raise HTTPException(404, f"Stack {payload.stack} has no bridge in STACK_HOSTS")
+    segment = led_segment(payload.shelf, payload.row)
+    if segment is None:
+        raise HTTPException(
+            404, f"Shelf {payload.shelf} row {payload.row} is not in the LED map"
+        )
+    path, start, end = segment
+    query = (
+        f"path={path}&start={start}&end={end}"
+        f"&r={payload.r}&g={payload.g}&b={payload.b}"
+        f"&brightness={brightness(payload.intensity)}"
+    )
+    host = await resolve(host_name)
+    try:
+        async with _client() as client:
+            body = await _get_json(client, f"http://{host}/led?{query}")
+    except httpx.HTTPError as error:
+        forget(host_name)
+        raise HTTPException(502, f"Could not reach {host_name} ({host}): {error}")
+    except ValueError:
+        raise HTTPException(502, f"{host_name} returned a non-JSON response")
+    return {
+        "ok": True,
+        "arduino_online": bool(body.get("arduino_online")),
+        "sent": {"path": path, "start": start, "end": end},
+        "device_response": body,
+    }
 
 
 @app.get("/video")

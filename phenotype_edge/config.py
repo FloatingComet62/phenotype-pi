@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     # has died (ESP32s do this) but that still answer HTTP: the resolver
     # finds the MAC in this Pi's ARP table, sweeping the subnet if needed.
     board_macs: str = ""
+    # Boards that restart themselves when nobody has talked to them for five
+    # minutes and that nothing else polls yet (the stack bridges). The relay
+    # board is always included. Comma-separated.
+    keepalive_hosts: str = ""
+    # Stack bridges in stack order: position n is stack n. POST /stack-led
+    # sends a row's colour to the right one.
+    stack_hosts: str = ""
 
     @property
     def board_mac_map(self) -> dict[str, str]:
