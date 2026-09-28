@@ -144,6 +144,50 @@ Because this board switches a compressor, restarts are rationed. Every restart t
 
 Flashing this board releases every output while the chip is in the bootloader, so the AC will run during the flash. After the first boot the saved state is empty (everything released); toggle AC 1 once from the dashboard to bring the two back in step.
 
+### The stack controller bridge (`src/esp32_stack`)
+
+One ESP32 per stack sits between the Pi and that stack's Arduino. The Arduino drives three WS2812B strips and the pump and reads the pH probe and the pump's current sense; the ESP32 gives it an HTTP face on the Wi-Fi. Env `esp32_stack1` (hostname `stack1`); copy the env and change the name for further stacks.
+
+~~~text
+Pi --HTTP--> ESP32 (stack1.local) --UART 115200--> Arduino --> strips, pump
+                                  <-- "3,volts" "4,ph" every second
+~~~
+
+Wiring, three wires:
+
+| Arduino | ESP32 | Note |
+| --- | --- | --- |
+| TX (pin 1) | GPIO 16 (RX2) | **Through a divider or level shifter.** The Arduino drives 5 V; the ESP32 pin takes 3.3 V. 1 kΩ from Arduino TX to the ESP32 pin, 2 kΩ from that pin to GND. |
+| RX (pin 0) | GPIO 17 (TX2) | Direct. 3.3 V reads as high on the Arduino. |
+| GND | GND | Required. |
+
+The Arduino's pins 0 and 1 are also its USB serial. Unplug the ESP32 wires while uploading a sketch to the Arduino, and do not keep a serial monitor open on it while the ESP32 is connected.
+
+| Route | Does |
+| --- | --- |
+| `GET /reading` | `{"ph":6.84,"ph_age_seconds":0,"motor_voltage":1.35,"motor_age_seconds":0,"arduino_online":true}`, or 503 when the Arduino has been silent for 5 s |
+| `GET /led?path=0&r=255&g=0&b=0` | Sends `path,start,end,r,g,b,brightness`. `path` 0-2 and `r`,`g`,`b` are required; `start`,`end` default to the whole strip (0-299), `brightness` to 255. |
+| `GET /pump?speed=180` | Sends `3,speed`. 0-255, 0 stops the pump. |
+| `GET /status` | Readings, the last command sent on each path, line counters, signal strength, uptime, restart count |
+
+Strip layout on a stack (2 shelves × 4 rows), as wired on site:
+
+| Path | Arduino pin | Rows |
+| --- | --- | --- |
+| 0 | 13 | Shelf 1, rows 1-3 |
+| 1 | 12 | Shelf 2, rows 1-3 |
+| 2 | 11 | Shelf 1 row 4, then shelf 2 row 4 |
+
+A row is a `start..end` range of LED indexes on its strip. The ranges are not known yet; they are needed before the dashboard's per-row LED controls can be mapped.
+
+Things to know:
+
+- **The Arduino never acknowledges a command.** `/led` and `/pump` report what was sent, not what happened. The pump's current sense in `/reading` is the only feedback.
+- **Commands are spaced 150 ms apart.** While the Arduino clocks out 900 LEDs its interrupts are off and it cannot hear the serial line; two commands sent back to back arrive corrupted.
+- **The Arduino sketch needs a Mega.** Three buffers of 300 LEDs take 2700 bytes; with the rest of the sketch that is 3224 bytes, against 2048 on an Uno or Nano (157 %). On a Mega 2560 it uses 39 %. On an Uno it compiles and then misbehaves. To stay on an Uno the strips must total about 450 LEDs or fewer.
+- **The pump starts at half speed** (PWM 128) whenever the Arduino powers up, before anyone has commanded it. That is the sketch's own default.
+- Restarting the ESP32 does not disturb the LEDs or the pump; the Arduino holds them.
+
 ## 4. Edge service: setup on the Pi
 
 Prerequisites: Raspberry Pi OS with Python 3.13.5 available to [uv](https://docs.astral.sh/uv/) (pinned in `.python-version` and `pyproject.toml`), plus the OS packages for the camera:
