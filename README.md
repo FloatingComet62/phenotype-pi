@@ -180,12 +180,25 @@ Strip layout on a stack (2 shelves × 4 rows), as wired on site:
 
 A row is a `start..end` range of LED indexes on its strip. The ranges are not known yet; they are needed before the dashboard's per-row LED controls can be mapped.
 
+What happens when something dies:
+
+| Failure | Response |
+| --- | --- |
+| Wi-Fi drops | Reconnect, then a Wi-Fi driver restart at 30 s, then a chip restart at 60 s. Restarts back off while nothing is being served. |
+| Board answers ARP but serves nothing | Chip restart after 5 min without a served request. |
+| Board freezes outright | The hardware watchdog restarts it after 30 s. |
+| ESP32 restarts, for any reason | The Arduino keeps the LEDs and pump as they were. The commanded state is read back from flash. |
+| Arduino resets, or a command is lost on the wire | The commanded state is sent again: at once when telemetry resumes after a gap of 2.5 s, and every minute regardless. |
+| Arduino goes silent | `/reading` answers 503 and `/status` reports `arduino_online:false`. |
+
+Nothing switches the pump or the LEDs off by itself. `/status` reports `resends`, `arduino_gaps` and `restarts`, which is how to see from the Pi that any of this has been happening.
+
 Things to know:
 
 - **The Arduino never acknowledges a command.** `/led` and `/pump` report what was sent, not what happened. The pump's current sense in `/reading` is the only feedback.
 - **Commands are spaced 150 ms apart.** While the Arduino clocks out 900 LEDs its interrupts are off and it cannot hear the serial line; two commands sent back to back arrive corrupted.
 - **The Arduino sketch needs a Mega.** Three buffers of 300 LEDs take 2700 bytes; with the rest of the sketch that is 3224 bytes, against 2048 on an Uno or Nano (157 %). On a Mega 2560 it uses 39 %. On an Uno it compiles and then misbehaves. To stay on an Uno the strips must total about 450 LEDs or fewer.
-- **The pump starts at half speed** (PWM 128) whenever the Arduino powers up, before anyone has commanded it. That is the sketch's own default.
+- **The pump starts at half speed** (PWM 128) whenever the Arduino powers up. That is the sketch's own default. Once a speed has been commanded, the bridge sends it again within a few seconds of the Arduino coming back, so the default only lasts until then.
 - Restarting the ESP32 does not disturb the LEDs or the pump; the Arduino holds them.
 
 ## 4. Edge service: setup on the Pi

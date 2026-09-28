@@ -24,7 +24,22 @@
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 #include "../secrets.h"
+
+// What happens when something dies:
+//   Wi-Fi drops          reconnect -> Wi-Fi driver restart (30 s) -> chip
+//                        restart (60 s), backing off while nothing is served
+//   ESP32 answers ARP    chip restart after 5 min without a served request
+//     but no requests
+//   ESP32 freezes        hardware watchdog restarts it after 30 s
+//   ESP32 restarts       the Arduino keeps LEDs and pump as they were; the
+//                        commanded state is read back from flash
+//   Arduino resets,      the commanded state is sent again: at once when
+//     or a command is      telemetry resumes after a gap, and every minute
+//     lost on the wire     regardless (the Arduino never acknowledges)
+//   Arduino goes silent  /reading answers 503, /status says arduino_online:false
+// Nothing here switches the pump or the LEDs off by itself.
 
 // ---------- Config ----------
 const char* WIFI_SSID     = WIFI_SSID_HOME;
@@ -51,6 +66,12 @@ const unsigned long COMMAND_GAP_MS = 150;
 
 // Telemetry arrives every second. Older than this and it is reported stale.
 const unsigned long TELEMETRY_STALE_MS = 5000;
+// A gap this long between telemetry lines means the Arduino probably reset
+// (its bootloader alone takes about 1.5 s) and has forgotten its outputs.
+const unsigned long TELEMETRY_GAP_RESET_MS = 2500;
+// How often the commanded state is sent again regardless.
+const unsigned long REASSERT_INTERVAL_MS = 60000;
+const int HARDWARE_WATCHDOG_S = 30;
 
 #ifndef WIFI_TX_POWER
 #define WIFI_TX_POWER WIFI_POWER_13dBm
@@ -69,11 +90,51 @@ float motorVolts = NAN, ph = NAN;
 unsigned long motorAt = 0, phAt = 0;      // millis() of the last good line
 unsigned long linesOk = 0, linesBad = 0, commandsSent = 0;
 
-// Last thing we told the Arduino. It never acknowledges, so this is what was
-// sent, not what happened. -1 = nothing sent since this board started.
-int pumpSpeed = -1;
-struct Led { int start, end, r, g, b, brightness; };
-Led lastLed[NUM_STRIPS] = {{-1, 0, 0, 0, 0, 0}, {-1, 0, 0, 0, 0, 0}, {-1, 0, 0, 0, 0, 0}};
+// Commanded state: the last thing the Pi asked for. The Arduino never
+// acknowledges, so this is what was sent, not what happened. It lives in
+// flash so that it survives a restart of this board.
+const int SEGMENTS_PER_STRIP = 4;   // a strip carries at most 3 rows
+struct Segment {
+  int16_t start, end;
+  uint8_t r, g, b, brightness, used;
+};
+struct Desired {
+  uint8_t version;
+  int16_t pumpSpeed;                // -1 = never commanded
+  Segment seg[NUM_STRIPS][SEGMENTS_PER_STRIP];
+  uint8_t next[NUM_STRIPS];         // slot to recycle when a strip is full
+};
+const uint8_t DESIRED_VERSION = 1;
+Desired desired;
+
+void clearDesired(Desired& d) {
+  memset(&d, 0, sizeof(d));
+  d.version = DESIRED_VERSION;
+  d.pumpSpeed = -1;
+}
+
+// Records a segment. A new segment replaces the one with the same range and
+// swallows any it fully covers, so "whole strip red" wipes the three rows
+// stored before it and they are not sent again afterwards.
+void rememberSegment(Desired& d, int path, const Segment& incoming) {
+  Segment* slots = d.seg[path];
+  int target = -1;
+  for (int i = 0; i < SEGMENTS_PER_STRIP; i++) {
+    if (!slots[i].used) continue;
+    if (slots[i].start >= incoming.start && slots[i].end <= incoming.end) {
+      slots[i].used = 0;
+      if (target < 0) target = i;
+    }
+  }
+  for (int i = 0; target < 0 && i < SEGMENTS_PER_STRIP; i++)
+    if (!slots[i].used) target = i;
+  if (target < 0) {
+    target = d.next[path];
+    d.next[path] = (d.next[path] + 1) % SEGMENTS_PER_STRIP;
+  }
+  slots[target] = incoming;
+  slots[target].used = 1;
+}
 
 uint8_t restarts = 0;
 
@@ -92,6 +153,9 @@ bool parseTelemetry(const char* line, int& path, float& value) {
   return true;
 }
 
+unsigned long lastLineAt = 0, arduinoGaps = 0;
+void startReassert();
+
 void readArduino() {
   static char buf[48];
   static size_t len = 0;
@@ -108,25 +172,84 @@ void readArduino() {
     len = 0;
     int path; float value;
     if (overlong || !parseTelemetry(buf, path, value)) { linesBad++; continue; }
+    bool good = true;
     if (path == PUMP_PATH && value >= 0 && value <= 5.5) {
-      motorVolts = value; motorAt = millis(); linesOk++;
+      motorVolts = value; motorAt = millis();
     } else if (path == PH_PATH && value >= -1 && value <= 15) {
-      ph = value; phAt = millis(); linesOk++;
+      ph = value; phAt = millis();
     } else {
-      linesBad++;
+      good = false;
     }
+    if (!good) { linesBad++; continue; }
+    linesOk++;
+    unsigned long now = millis();
+    if (lastLineAt && now - lastLineAt > TELEMETRY_GAP_RESET_MS) {
+      Serial.println("telemetry resumed after a gap, sending the commanded state again");
+      arduinoGaps++;
+      startReassert();
+    }
+    lastLineAt = now;
   }
 }
 
-void sendCommand(const String& line) {
-  static unsigned long lastSent = 0;
-  while (millis() - lastSent < COMMAND_GAP_MS) { readArduino(); delay(1); }
+unsigned long lastSentAt = 0;
+
+bool canSend() { return millis() - lastSentAt >= COMMAND_GAP_MS; }
+
+void writeCommand(const String& line) {
   arduino.print(line);
   arduino.print('\n');
   arduino.flush();
-  lastSent = millis();
+  lastSentAt = millis();
   commandsSent++;
   Serial.printf("-> arduino: %s\n", line.c_str());
+}
+
+void sendCommand(const String& line) {
+  while (!canSend()) { readArduino(); delay(1); }
+  writeCommand(line);
+}
+
+String pumpLine(int speed) { return String(PUMP_PATH) + "," + speed; }
+
+String segmentLine(int path, const Segment& g) {
+  char line[48];
+  snprintf(line, sizeof(line), "%d,%d,%d,%d,%d,%d,%d",
+           path, g.start, g.end, g.r, g.g, g.b, g.brightness);
+  return line;
+}
+
+// Re-sending is spread over loop() passes, one command per gap, so that HTTP
+// requests are still served while it runs. Item 0 is the pump, then every
+// segment slot in turn.
+const int REASSERT_ITEMS = 1 + NUM_STRIPS * SEGMENTS_PER_STRIP;
+int reassertAt = REASSERT_ITEMS;   // == REASSERT_ITEMS: idle
+unsigned long lastReassert = 0, reasserts = 0;
+
+void startReassert() {
+  reassertAt = 0;
+  lastReassert = millis();
+  reasserts++;
+}
+
+void reassertStep() {
+  if (reassertAt >= REASSERT_ITEMS) {
+    if (millis() - lastReassert > REASSERT_INTERVAL_MS) startReassert();
+    return;
+  }
+  if (!canSend()) return;
+  while (reassertAt < REASSERT_ITEMS) {
+    int item = reassertAt++;
+    if (item == 0) {
+      if (desired.pumpSpeed < 0) continue;
+      writeCommand(pumpLine(desired.pumpSpeed));
+      return;
+    }
+    int path = (item - 1) / SEGMENTS_PER_STRIP, slot = (item - 1) % SEGMENTS_PER_STRIP;
+    if (!desired.seg[path][slot].used) continue;
+    writeCommand(segmentLine(path, desired.seg[path][slot]));
+    return;
+  }
 }
 
 // ---------- Self-restart with backoff (same scheme as the relay board) ----------
@@ -202,6 +325,17 @@ void ensureWifi() {
   }
 }
 
+// ---------- Commanded state in flash ----------
+void saveDesired() { prefs.putBytes("want", &desired, sizeof(desired)); }
+
+void loadDesired() {
+  Desired stored;
+  bool ok = prefs.getBytes("want", &stored, sizeof(stored)) == sizeof(stored)
+         && stored.version == DESIRED_VERSION;
+  if (ok) desired = stored; else clearDesired(desired);
+  Serial.printf("commanded state %s\n", ok ? "restored from flash" : "empty");
+}
+
 // ---------- HTTP ----------
 String num(float v, int decimals) { return isnan(v) ? String("null") : String(v, decimals); }
 long ageSeconds(unsigned long at) { return at ? (long)((millis() - at) / 1000) : -1; }
@@ -218,17 +352,25 @@ String readingJson() {
 String statusJson() {
   String json = readingJson();
   json.remove(json.length() - 1);
-  json += ",\"pump_speed\":" + (pumpSpeed < 0 ? String("null") : String(pumpSpeed));
+  json += ",\"pump_speed\":" + (desired.pumpSpeed < 0 ? String("null") : String(desired.pumpSpeed));
   json += ",\"leds\":[";
-  for (int i = 0; i < NUM_STRIPS; i++) {
-    const Led& l = lastLed[i];
-    if (i) json += ",";
-    if (l.start < 0) { json += "null"; continue; }
-    json += "{\"start\":" + String(l.start) + ",\"end\":" + String(l.end) +
-            ",\"r\":" + String(l.r) + ",\"g\":" + String(l.g) + ",\"b\":" + String(l.b) +
-            ",\"brightness\":" + String(l.brightness) + "}";
+  for (int path = 0; path < NUM_STRIPS; path++) {
+    if (path) json += ",";
+    json += "[";
+    bool first = true;
+    for (int i = 0; i < SEGMENTS_PER_STRIP; i++) {
+      const Segment& g = desired.seg[path][i];
+      if (!g.used) continue;
+      if (!first) json += ",";
+      first = false;
+      json += "{\"start\":" + String(g.start) + ",\"end\":" + String(g.end) +
+              ",\"r\":" + String(g.r) + ",\"g\":" + String(g.g) + ",\"b\":" + String(g.b) +
+              ",\"brightness\":" + String(g.brightness) + "}";
+    }
+    json += "]";
   }
   json += "]";
+  json += ",\"resends\":" + String(reasserts) + ",\"arduino_gaps\":" + String(arduinoGaps);
   json += ",\"lines_ok\":" + String(linesOk) + ",\"lines_bad\":" + String(linesBad);
   json += ",\"commands_sent\":" + String(commandsSent);
   json += ",\"rssi\":" + String(WiFi.RSSI());
@@ -288,20 +430,21 @@ void handleStatus() {
 
 void handleLed() {
   touchServed();
-  int path, start, end, r, g, b, brightness;
+  int path, start, end, r, gr, b, brightness;
   if (!intArg("path", 0, NUM_STRIPS - 1, -1, path)) return;
   if (!intArg("start", 0, NUM_LEDS - 1, 0, start)) return;
   if (!intArg("end", 0, NUM_LEDS - 1, NUM_LEDS - 1, end)) return;
   if (!intArg("r", 0, 255, -1, r)) return;
-  if (!intArg("g", 0, 255, -1, g)) return;
+  if (!intArg("g", 0, 255, -1, gr)) return;
   if (!intArg("b", 0, 255, -1, b)) return;
   if (!intArg("brightness", 0, 255, 255, brightness)) return;
   if (start > end) { int t = start; start = end; end = t; }
 
-  char line[48];
-  snprintf(line, sizeof(line), "%d,%d,%d,%d,%d,%d,%d", path, start, end, r, g, b, brightness);
-  sendCommand(line);
-  lastLed[path] = {start, end, r, g, b, brightness};
+  Segment g = {(int16_t)start, (int16_t)end, (uint8_t)r, (uint8_t)gr, (uint8_t)b,
+               (uint8_t)brightness, 1};
+  sendCommand(segmentLine(path, g));
+  rememberSegment(desired, path, g);
+  saveDesired();
   server.send(200, "application/json", statusJson());
 }
 
@@ -309,8 +452,9 @@ void handlePump() {
   touchServed();
   int speed;
   if (!intArg("speed", 0, 255, -1, speed)) return;
-  sendCommand(String(PUMP_PATH) + "," + speed);
-  pumpSpeed = speed;
+  sendCommand(pumpLine(speed));
+  desired.pumpSpeed = speed;
+  saveDesired();
   server.send(200, "application/json", statusJson());
 }
 
@@ -324,7 +468,30 @@ void selfTest() {
          && !parseTelemetry("", p, v) && !parseTelemetry("4", p, v)
          && !parseTelemetry("4,", p, v) && !parseTelemetry("4,6.8x", p, v)
          && !parseTelemetry("x,1", p, v) && !parseTelemetry("4,nan", p, v);
-  Serial.println(ok ? "self-test ok" : "SELF-TEST FAILED: telemetry parser");
+  Desired d;
+  clearDesired(d);
+  rememberSegment(d, 0, {0, 99, 1, 1, 1, 255, 1});
+  rememberSegment(d, 0, {100, 199, 2, 2, 2, 255, 1});
+  rememberSegment(d, 0, {0, 99, 9, 9, 9, 255, 1});          // same range: replaces
+  int used = 0, nines = 0;
+  for (const Segment& g : d.seg[0]) { used += g.used; nines += g.used && g.r == 9; }
+  ok = ok && used == 2 && nines == 1;
+  rememberSegment(d, 0, {0, 299, 7, 7, 7, 255, 1});         // whole strip: swallows both
+  used = 0;
+  for (const Segment& g : d.seg[0]) used += g.used;
+  ok = ok && used == 1 && d.pumpSpeed == -1 && !d.seg[1][0].used;
+  Serial.println(ok ? "self-test ok" : "SELF-TEST FAILED");
+}
+
+void startHardwareWatchdog() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t config = {.timeout_ms = HARDWARE_WATCHDOG_S * 1000,
+                                  .idle_core_mask = 0, .trigger_panic = true};
+  esp_task_wdt_reconfigure(&config);
+#else
+  esp_task_wdt_init(HARDWARE_WATCHDOG_S, true);
+#endif
+  esp_task_wdt_add(NULL);
 }
 
 void setup() {
@@ -335,6 +502,7 @@ void setup() {
   prefs.begin("stack", false);
   restarts = prefs.getUChar("rst", 0);
   Serial.printf("consecutive self-restarts: %u\n", restarts);
+  loadDesired();
 
   beginWifi();
   Serial.print("Connecting to WiFi");
@@ -361,12 +529,16 @@ void setup() {
   server.begin();
   Serial.println("HTTP server started");
   lastServed = millis();
+  startHardwareWatchdog();   // after the Wi-Fi wait above, which may take 12 s
+  startReassert();           // the Arduino may have reset while we were away
 }
 
 // ---------- Loop ----------
 void loop() {
+  esp_task_wdt_reset();
   readArduino();
   server.handleClient();
+  reassertStep();
   ensureWifi();
   checkServeWatchdog();
 }
