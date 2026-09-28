@@ -170,15 +170,20 @@ The Arduino's pins 0 and 1 are also its USB serial. Unplug the ESP32 wires while
 | `GET /pump?speed=180` | Sends `3,speed`. 0-255, 0 stops the pump. |
 | `GET /status` | Readings, the last command sent on each path, line counters, signal strength, uptime, restart count |
 
-Strip layout on a stack (2 shelves × 4 rows), as wired on site:
+Row map, measured on site on 28 Sep (`phenotype_edge/stacks.py`). Indexes are the Arduino's, 0-299:
 
-| Path | Arduino pin | Rows |
-| --- | --- | --- |
-| 0 | 13 | Shelf 1, rows 1-3 |
-| 1 | 12 | Shelf 2, rows 1-3 |
-| 2 | 11 | Shelf 1 row 4, then shelf 2 row 4 |
+| Shelf | Row | Path (Arduino pin) | LEDs |
+| --- | --- | --- | --- |
+| 1 | 1 | 0 (13) | 4-87 |
+| 1 | 2 | 0 (13) | 104-190 |
+| 1 | 3 | 0 (13) | 205-299 |
+| 1 | 4 | 2 (11) | 1-83 |
+| 2 | 1 | 1 (12) | 1-86 |
+| 2 | 2 | 1 (12) | 105-189 |
+| 2 | 3 | 1 (12) | 206-290 |
+| 2 | 4 | 2 (11) | 106-188 |
 
-A row is a `start..end` range of LED indexes on its strip. The ranges are not known yet; they are needed before the dashboard's per-row LED controls can be mapped.
+From the dashboard to a strip: a row's LED card → backend `PUT /v2/actuators/{id}/led` or the power toggle → Pi `POST /stack-led {"stack":1,"shelf":1,"row":2,"r":..,"g":..,"b":..,"intensity":0-100}` → bridge `/led?path=0&start=104&end=190&...&brightness=0-255` → Arduino. `STACK_HOSTS` on the Pi names the bridges in stack order. A strip that is switched off is sent brightness 0 and keeps its colour. Only stack 1 has a bridge; the map is shared by all stacks until a second one is measured.
 
 What happens when something dies:
 
@@ -247,6 +252,8 @@ The committed unit assumes `/home/pi/phenotype` and user `pi`. The live Pi uses 
 | EXHAUST_FAN_HOST | *(empty)* | Board whose SSR drives the exhaust fan (`dht1.local`). Empty means channel `exhaust` returns 502. |
 | EXHAUST_FAN_CHANNEL | 1 | SSR channel on that board. |
 | AC2_HOST | *(empty)* | Board with the second AC output (`dht4.local`). Channel `ac2`. |
+| STACK_HOSTS | *(empty)* | Stack bridges in stack order (`stack1.local`). Position n is stack n. |
+| KEEPALIVE_HOSTS | *(empty)* | Boards that restart themselves when idle and that nothing polls (`stack1.local`). The relay board is always included. |
 | VALVE_MASTER_CHANNEL | *(empty)* | Relay number of the master valve (`4`). Enables channels `valve1`.. . |
 | REQUEST_TIMEOUT_SECONDS | 8 | For board, relay and ingest requests. |
 
@@ -332,6 +339,8 @@ Symptoms we have seen and what they meant:
 
 - **Dashboard toggle says "Edge service at http://host.docker.internal:18090 timed out".** Either the tunnel is down (check the Pi unit) or the board behind that channel is off the network (curl it by IP from the Pi). The backend keeps the old state and shows the error inline.
 - **A zone goes stale while its board answers `curl` by IP.** The board's mDNS responder has died (they do, after a Wi-Fi hiccup) and its MAC is missing from `BOARD_MACS`. Add it; the resolver logs `found by MAC` when the fallback is doing the work.
+- **A new board is refused by the router (`wifi_reason` 202, AUTH_FAIL) with the right password.** The router is full. It takes about eight devices; a ninth is refused until one leaves. Confirmed on 28 Sep: the stack bridge was refused for half an hour and joined within two minutes of another device disconnecting. This is also the likeliest reason boards have been dropping one at a time all along.
+- **A deployed board restarts when you open its serial port.** Opening the port pulses the reset line. Do not watch a board over USB while testing it over the network.
 - **Every zone and the AC fail at once after a power cut.** The router re-dealt DHCP leases. With names in `.env` this now heals itself within a poll cycle; with IPs it does not.
 - **`Failed to read .../reading: 503`.** The board is up but its SHT20 is not answering: wrong pins or a dead sensor. The serial banner says which pin pair it found, if any.
 - **Board unreachable for minutes, then back.** dht1 does this. Suspect its supply or its position relative to the access point; the other three boards on the same firmware do not drop.
@@ -342,6 +351,7 @@ Symptoms we have seen and what they meant:
 
 In rough priority order:
 
+0. **Replace or reconfigure the room router.** It admits about eight devices and the room already has seven boards plus the Pi, with two more stack bridges to come. Nothing else on this list is reliable until that is fixed.
 1. **DHCP reservations on the room router** for the five boards. The resolver copes with moving addresses now, but reservations make its MAC sweep unnecessary and keep the IP table in §2 true.
 2. **Make dht1 stay up.** It drives the fan, so it matters most. Check its power supply and Wi-Fi signal; if it still drops, move the SSR to dht4 (already has the firmware, spare channel wired to GPIO 25) and point `EXHAUST_FAN_HOST` there.
 3. **A proper hostname for the backend** (an A record such as `phenotype-api.<yourdomain>` → 103.25.130.37) instead of nip.io, which some networks block by SNI. Update Caddy, the Pi's `.env` and `/etc/hosts`, and the dashboard's `VITE_API_BASE`.
