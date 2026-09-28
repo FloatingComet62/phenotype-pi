@@ -1,4 +1,4 @@
-"""Board name -> IP, via Avahi's service browse.
+"""Board name -> IP: by MAC for known boards, Avahi browse for the rest.
 
 The boards are DHCP clients, so their IPs move whenever the router
 restarts. Their mDNS names are stable, but a unicast ``.local`` lookup
@@ -21,7 +21,8 @@ from .config import settings
 
 logger = logging.getLogger("resolve")
 
-_cache: dict[str, str] = {}
+_cache: dict[str, str] = {}   # name -> ip, resolved and in use
+_browse: dict[str, str] = {}  # name -> ip, as Avahi last reported
 _last_refresh = 0.0
 _REFRESH_SECONDS = 60
 _lock = asyncio.Lock()
@@ -47,10 +48,8 @@ async def refresh() -> None:
             # "=;wlan0;IPv4;dht1;_http._tcp;local;dht1.local;192.168.8.198;80;"
             if len(f) > 7 and f[0] == "=" and f[2] == "IPv4" and f[7]:
                 found[f[6].lower()] = f[7]
-        moved = {n: ip for n, ip in found.items() if _cache.get(n) not in (None, ip)}
-        if moved:
-            logger.info("boards moved: %s", moved)
-        _cache.update(found)
+        _browse.clear()
+        _browse.update(found)
         _last_refresh = time.monotonic()
 
 
@@ -62,12 +61,21 @@ async def _sh(*args, timeout=20) -> str:
     return out.decode(errors="replace")
 
 
+_STATE_RANK = {"REACHABLE": 0, "DELAY": 1, "PROBE": 1, "STALE": 2}
+
+
 async def _arp_lookup(mac: str) -> str | None:
+    """IP currently holding ``mac``. After leases move, the ARP table can
+    hold the same MAC at an old and a new address; the freshest state wins."""
+    best = None
     for line in (await _sh("ip", "-4", "neigh", "show")).splitlines():
         f = line.split()
-        if "lladdr" in f and f[f.index("lladdr") + 1].lower() == mac and "FAILED" not in f:
-            return f[0]
-    return None
+        if "lladdr" not in f or f[f.index("lladdr") + 1].lower() != mac:
+            continue
+        rank = _STATE_RANK.get(f[-1])
+        if rank is not None and (best is None or rank < best[0]):
+            best = (rank, f[0])
+    return best[1] if best else None
 
 
 async def _sweep() -> None:
@@ -93,39 +101,45 @@ async def _sweep() -> None:
 _last_sweep = 0.0
 
 
-async def _by_mac(name: str) -> str | None:
+async def _by_mac(mac: str) -> str | None:
+    """Sweep (at most every 30 s) so stale entries age out, then look up."""
     global _last_sweep
-    mac = settings.board_mac_map.get(name)
-    if not mac:
-        return None
-    ip = await _arp_lookup(mac)
-    if ip is None and time.monotonic() - _last_sweep > 30:
+    if time.monotonic() - _last_sweep > 30:
         _last_sweep = time.monotonic()
         await _sweep()
-        ip = await _arp_lookup(mac)
-    return ip
+    return await _arp_lookup(mac)
 
 
 async def resolve(host: str) -> str:
     """Return the IP for a ``.local`` name, or ``host`` itself otherwise.
 
-    Order: Avahi browse cache, then the board's MAC in the ARP table (for a
-    board whose mDNS responder has died), then the bare name.
+    A board listed in BOARD_MACS is found by its MAC and nothing else: the
+    MAC is the only identity that cannot be wrong. mDNS can be: on 28 Sep
+    Avahi reported dht1 at dht4's address while the real dht1 announced
+    itself as "dht1-2" after a name clash, and Zone 1 was fed Zone 4's
+    readings. Avahi's browse table is used only for names with no MAC.
+
+    A resolved address is kept until a request to it fails (see forget()),
+    so the subnet sweep runs only when a board has actually gone missing.
     """
     if not host.endswith(".local"):
         return host
     name = host.lower()
-    if name not in _cache or time.monotonic() - _last_refresh > _REFRESH_SECONDS:
-        await refresh()
     ip = _cache.get(name)
-    if ip is None:
-        ip = await _by_mac(name)
+    if ip:
+        return ip
+    mac = settings.board_mac_map.get(name)
+    if mac:
+        ip = await _by_mac(mac)
         if ip:
-            logger.info("%s found by MAC at %s (mDNS responder silent)", host, ip)
-            _cache[name] = ip
+            logger.info("%s is at %s (by MAC %s)", host, ip, mac)
+    else:
+        await refresh()
+        ip = _browse.get(name)
     if ip is None:
-        logger.warning("%s not seen on the LAN; trying the name directly", host)
+        logger.warning("%s not found on the LAN", host)
         return host
+    _cache[name] = ip
     return ip
 
 
