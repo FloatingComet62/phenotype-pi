@@ -118,7 +118,26 @@ Two things that bit us:
 
 ### The relay board (`src/esp32_relay`)
 
-Same structure as the SSR half of the sensor firmware, with four channels (`/relay?ch=1..4`), `/all`, `/ac`, and `/status`. The AC output is wired inverted on the physical board and the Pi compensates. The deployed board still runs an older build with hostname `relay`; this sketch defaults to `esp32-relay`, so keep `RELAY_HOST` on the Pi in step with whatever is flashed.
+Four relays on GPIO 16/17/18/19 (`/relay?ch=1..4`, `/all`), the AC output on GPIO 23 (`/ac`), and `/status`. All outputs are active-low. The AC contact is wired inverted, so a released output means the AC runs; the Pi's relay proxy compensates and this sketch does not. Hostname `relay`, MAC `c0:cd:d6:d0:04:64`.
+
+| Dashboard card | Backend actuator | Pi channel | Board route |
+| --- | --- | --- | --- |
+| AC 1 (Farm climate control) | 9001 | `ac` | `/ac` |
+| Light 1-4 (Relay board on Pi 1) | 1-4 | `1`-`4` | `/relay?ch=N` |
+| AC (Relay board on Pi 1, legacy) | 5 | `ac` | `/ac`, same output as AC 1 |
+
+Wi-Fi behaviour, in order of escalation:
+
+1. Modem sleep off, transmit power 13 dBm (`-DWIFI_TX_POWER=...` to change), address from DHCP.
+2. Link checked every 15 s; `WiFi.reconnect()` while it is down.
+3. Down for 30 s: the Wi-Fi driver is shut down and started again.
+4. Down for 60 s, or no HTTP request served for 5 min: the chip restarts. The Pi GETs `/status` every minute, so a healthy board never hits the second rule.
+
+Because this board switches a compressor, restarts are rationed. Every restart that is not followed by a served request doubles both timeouts, up to 16x, so a router or Pi that is simply off costs a handful of restarts a day, not one a minute. Outputs are saved to flash on every change and restored first thing at boot, and the pads are latched (`gpio_hold_en`) across a planned restart so the relays should not click. **That last part has not been verified on the bench yet**: force a restart with the AC relay connected to nothing and listen.
+
+`/status` also returns `rssi`, `uptime_s` and `restarts`, which is how to tell from the Pi whether a board is restarting itself and how good its link is.
+
+Flashing this board releases every output while the chip is in the bootloader, so the AC will run during the flash. After the first boot the saved state is empty (everything released); toggle AC 1 once from the dashboard to bring the two back in step.
 
 ## 4. Edge service: setup on the Pi
 
@@ -262,7 +281,8 @@ In rough priority order:
 1. **DHCP reservations on the room router** for the five boards. The resolver copes with moving addresses now, but reservations make its MAC sweep unnecessary and keep the IP table in §2 true.
 2. **Make dht1 stay up.** It drives the fan, so it matters most. Check its power supply and Wi-Fi signal; if it still drops, move the SSR to dht4 (already has the firmware, spare channel wired to GPIO 25) and point `EXHAUST_FAN_HOST` there.
 3. **A proper hostname for the backend** (an A record such as `phenotype-api.<yourdomain>` → 103.25.130.37) instead of nip.io, which some networks block by SNI. Update Caddy, the Pi's `.env` and `/etc/hosts`, and the dashboard's `VITE_API_BASE`.
-4. **Reflash the relay board** with `src/esp32_relay` so it gets the same reconnect logic as the sensor boards. Decide on the hostname (`relay` vs `esp32-relay`) and set `RELAY_HOST` to match.
+4. **Flash the relay board** with `src/esp32_relay` (see §3), then bench-check the pad hold. After that, give the sensor firmware the same Wi-Fi escalation and an I2C re-initialise, and flash the four sensor boards once.
+4a. **Put the Pi on Ethernet.** It is on Wi-Fi today, so every poll and the camera stream cross the 2.4 GHz air twice.
 5. **Wire the rest of the farm actuators.** AC 1, AC 2, circulation pumps, water valves and row LEDs exist in the backend as logical devices. Each needs a physical output and a relay-proxy channel. The pattern is the one used for the fan: a named channel in `/relay-proxy` mapped to a board and a channel via `.env`, and a `FARM_ACTUATOR_CHANNELS` entry in the backend's `provision.py`. When a second board of SSRs appears, replace `EXHAUST_FAN_HOST` with a small channel→host map.
 6. **Per-stack sensors.** The backend already has slots for two temperature and two humidity sensors, pH and water level per stack. The same ESP32 firmware can serve them once the boards exist; the poller will need a name-mapping beyond `Zone n`.
 7. **Camera 2** has not uploaded since early September; its Pi (pi2) needs the same edge setup.

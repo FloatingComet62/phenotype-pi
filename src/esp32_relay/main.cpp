@@ -1,35 +1,53 @@
+// Relay board: 4 relays + the AC output, as an HTTP server on the room Wi-Fi.
+// The Pi's edge service is the only intended client (POST /relay-proxy there
+// becomes GET /relay, /ac and /status here).
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <driver/gpio.h>
 #include "../secrets.h"
 
 // ---------- Config ----------
 const char* WIFI_SSID     = WIFI_SSID_HOME;
 const char* WIFI_PASSWORD = WIFI_PASSWORD_HOME;
-const char* HOSTNAME      = "esp32-relay";   // -> http://esp32-relay.local
+const char* HOSTNAME      = "relay";   // -> http://relay.local, matches RELAY_HOST on the Pi
 
 // 4-channel relay GPIOs — change to match your wiring
 const int RELAY_PINS[4] = {16, 17, 18, 19};
 const int NUM_RELAYS = 4;
 
-// Dedicated AC control pin (separate relay/IR/contactor trigger)
+// Dedicated AC control pin. The AC contact is wired inverted (output released
+// = AC running); the Pi's relay proxy compensates, this sketch does not.
 const int AC_PIN = 23;
 
 // Active-low: LOW = ON, HIGH = OFF
 #define RELAY_ON  LOW
 #define RELAY_OFF HIGH
 
+// Transmit power. The board sits a few metres from the access point, and full
+// power (19.5 dBm) loads the 3.3 V regulator for nothing. Raise it with
+// -DWIFI_TX_POWER=WIFI_POWER_19_5dBm in platformio.ini if the link is weak.
+#ifndef WIFI_TX_POWER
+#define WIFI_TX_POWER WIFI_POWER_13dBm
+#endif
+
+// Recovery timings, before backoff (see restartMultiplier()).
+const unsigned long WIFI_CHECK_INTERVAL = 15000;               // look at the link
+const unsigned long WIFI_SOFT_RESET_MS  = 30000;               // restart the Wi-Fi driver
+const unsigned long WIFI_RESTART_MS     = 60000;               // restart the chip
+const unsigned long SERVE_TIMEOUT       = 5UL * 60UL * 1000UL; // no request served
+
 WebServer server(80);
-// Output states survive a reboot. With the AC contact wired inverted, a
-// brownout that reboots this board would otherwise switch the AC on by
-// itself; restoring the last commanded state closes that hole.
 Preferences prefs;
 bool relayState[4] = {false, false, false, false}; // logical state, true = ON
 bool acState = false;
+uint8_t restarts = 0;   // consecutive self-restarts with nothing served in between
 
-// ---------- Helpers ----------
+// ---------- Outputs ----------
+// Output states live in flash. Any reboot of this board would otherwise
+// release the AC output, which with the inverted wiring switches the AC on.
 void saveStates() {
   uint8_t bits = 0;
   for (int i = 0; i < NUM_RELAYS; i++) if (relayState[i]) bits |= 1 << i;
@@ -50,28 +68,57 @@ void setAC(bool on) {
   saveStates();
 }
 
-// ---------- No-request watchdog (same as the sensor boards) ----------
-// The Pi's edge service GETs /status every minute (relay keepalive), so
-// five silent minutes means the board is wedged. Outputs are restored
-// from flash after the reboot.
+void restoreOutputs() {
+  uint8_t bits = prefs.getUChar("out", 0);
+  for (int i = 0; i <= NUM_RELAYS; i++) {
+    bool on = i < NUM_RELAYS ? bits & (1 << i) : bits & (1 << 7);
+    int pin = i < NUM_RELAYS ? RELAY_PINS[i] : AC_PIN;
+    if (i < NUM_RELAYS) relayState[i] = on; else acState = on;
+    // Level first, then drive the pin, then release any hold left by
+    // plannedRestart(): the relay goes straight to its saved state.
+    digitalWrite(pin, on ? RELAY_ON : RELAY_OFF);
+    pinMode(pin, OUTPUT);
+    gpio_hold_dis((gpio_num_t)pin);
+  }
+  Serial.printf("restored outputs 0x%02x\n", bits);
+}
+
+// ---------- Self-restart with backoff ----------
+// A restart is the only cure for a hung Wi-Fi stack, but this board switches
+// a compressor, so it must not restart in a loop while the router or the Pi
+// is simply off. Each restart that is not followed by a served request
+// doubles both timeouts, up to 16x (Wi-Fi 16 min, no-request 80 min).
+unsigned long restartMultiplier() { return 1UL << min<uint8_t>(restarts, 4); }
+
+void plannedRestart(const char* why) {
+  Serial.printf("restarting: %s (restart #%u)\n", why, restarts + 1);
+  prefs.putUChar("rst", min<uint8_t>(restarts + 1, 200));
+  // Latch the pads so the relays do not click while the chip resets.
+  for (int i = 0; i < NUM_RELAYS; i++) gpio_hold_en((gpio_num_t)RELAY_PINS[i]);
+  gpio_hold_en((gpio_num_t)AC_PIN);
+  WiFi.disconnect(true);
+  delay(1000);
+  ESP.restart();
+}
+
 unsigned long lastServed = 0;
-const unsigned long SERVE_TIMEOUT = 5UL * 60UL * 1000UL;
 
-void touchServed() { lastServed = millis(); }
-
-void checkWatchdog() {
-  if (millis() - lastServed > SERVE_TIMEOUT) {
-    Serial.println("no HTTP request served in 5 min, rebooting");
-    delay(100);
-    ESP.restart();
+void touchServed() {
+  lastServed = millis();
+  if (restarts) {
+    restarts = 0;
+    prefs.putUChar("rst", 0);
   }
 }
 
-// ---------- Wi-Fi keepalive (same as the sensor boards) ----------
-bool wifiUp = false;
-unsigned long lastWifiCheck = 0;
-const unsigned long WIFI_CHECK_INTERVAL = 15000;
+void checkServeWatchdog() {
+  // The Pi GETs /status every minute. Silence this long while we believe we
+  // are online is the state where the board answers ARP but no TCP.
+  if (millis() - lastServed > SERVE_TIMEOUT * restartMultiplier())
+    plannedRestart("no request served");
+}
 
+// ---------- Wi-Fi ----------
 void startMdns() {
   MDNS.end();
   if (MDNS.begin(HOSTNAME)) {
@@ -82,33 +129,85 @@ void startMdns() {
   }
 }
 
+void beginWifi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname(HOSTNAME);     // DHCP; the router owns the address
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);           // modem sleep gets boards dropped by the AP
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.setTxPower(WIFI_TX_POWER);
+}
+
+bool wifiUp = false;
+bool softResetDone = false;
+unsigned long lastWifiCheck = 0;
+unsigned long wifiDownSince = 0;
+
 void ensureWifi() {
   unsigned long now = millis();
   if (now - lastWifiCheck < WIFI_CHECK_INTERVAL) return;
   lastWifiCheck = now;
-  bool up = WiFi.status() == WL_CONNECTED;
-  if (up && !wifiUp) {
-    Serial.print("WiFi up, IP: ");
-    Serial.println(WiFi.localIP());
-    startMdns();
-  } else if (!up) {
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiUp) {
+      Serial.print("WiFi up, IP: ");
+      Serial.println(WiFi.localIP());
+      startMdns();   // the responder does not survive a reconnect
+    }
+    wifiUp = true;
+    softResetDone = false;
+    return;
+  }
+
+  if (wifiUp || wifiDownSince == 0) wifiDownSince = now;
+  wifiUp = false;
+  unsigned long downFor = now - wifiDownSince;
+
+  if (downFor > WIFI_RESTART_MS * restartMultiplier()) {
+    plannedRestart("Wi-Fi would not reconnect");
+  } else if (downFor > WIFI_SOFT_RESET_MS && !softResetDone) {
+    Serial.println("WiFi down 30 s, restarting the Wi-Fi driver");
+    softResetDone = true;
+    WiFi.disconnect(true);
+    delay(500);
+    beginWifi();
+  } else {
     Serial.println("WiFi down, reconnecting");
     WiFi.reconnect();
   }
-  wifiUp = up;
 }
 
+// ---------- HTTP ----------
 String statusJson() {
   String json = "{";
   for (int i = 0; i < NUM_RELAYS; i++) {
     json += "\"relay" + String(i + 1) + "\":" + (relayState[i] ? "true" : "false") + ",";
   }
   json += "\"ac\":" + String(acState ? "true" : "false");
+  // Diagnostics. The Pi only reads the keys above.
+  json += ",\"rssi\":" + String(WiFi.RSSI());
+  json += ",\"uptime_s\":" + String(millis() / 1000);
+  json += ",\"restarts\":" + String(restarts);
   json += "}";
   return json;
 }
 
-// ---------- Handlers ----------
+bool readState(bool& on) {
+  if (!server.hasArg("state")) {
+    server.send(400, "application/json", "{\"error\":\"missing state param\"}");
+    return false;
+  }
+  String state = server.arg("state");
+  state.toLowerCase();
+  if (state != "on" && state != "off") {
+    server.send(400, "application/json", "{\"error\":\"state must be on or off\"}");
+    return false;
+  }
+  on = state == "on";
+  return true;
+}
+
 void handleRoot() {
   touchServed();
   server.send(200, "text/plain",
@@ -121,60 +220,35 @@ void handleRoot() {
 
 void handleRelay() {
   touchServed();
-  if (!server.hasArg("ch") || !server.hasArg("state")) {
+  if (!server.hasArg("ch")) {
     server.send(400, "application/json", "{\"error\":\"missing ch or state param\"}");
     return;
   }
-
   int ch = server.arg("ch").toInt();
-  String state = server.arg("state");
-  state.toLowerCase();
-
   if (ch < 1 || ch > NUM_RELAYS) {
     server.send(400, "application/json", "{\"error\":\"ch must be 1-4\"}");
     return;
   }
-  if (state != "on" && state != "off") {
-    server.send(400, "application/json", "{\"error\":\"state must be on or off\"}");
-    return;
-  }
-
-  setRelay(ch - 1, state == "on");
+  bool on;
+  if (!readState(on)) return;
+  setRelay(ch - 1, on);
   server.send(200, "application/json", statusJson());
 }
 
 void handleAll() {
   touchServed();
-  if (!server.hasArg("state")) {
-    server.send(400, "application/json", "{\"error\":\"missing state param\"}");
-    return;
-  }
-  String state = server.arg("state");
-  state.toLowerCase();
-  if (state != "on" && state != "off") {
-    server.send(400, "application/json", "{\"error\":\"state must be on or off\"}");
-    return;
-  }
-
-  for (int i = 0; i < NUM_RELAYS; i++) setRelay(i, state == "on");
+  bool on;
+  if (!readState(on)) return;
+  for (int i = 0; i < NUM_RELAYS; i++) setRelay(i, on);
   // AC deliberately excluded from /all — control it explicitly via /ac
   server.send(200, "application/json", statusJson());
 }
 
 void handleAC() {
   touchServed();
-  if (!server.hasArg("state")) {
-    server.send(400, "application/json", "{\"error\":\"missing state param\"}");
-    return;
-  }
-  String state = server.arg("state");
-  state.toLowerCase();
-  if (state != "on" && state != "off") {
-    server.send(400, "application/json", "{\"error\":\"state must be on or off\"}");
-    return;
-  }
-
-  setAC(state == "on");
+  bool on;
+  if (!readState(on)) return;
+  setAC(on);
   server.send(200, "application/json", statusJson());
 }
 
@@ -191,53 +265,28 @@ void handleNotFound() {
 void setup() {
   Serial.begin(115200);
 
-  // Initialize all outputs OFF *before* declaring as OUTPUT
-  for (int i = 0; i < NUM_RELAYS; i++) {
-    digitalWrite(RELAY_PINS[i], RELAY_OFF);
-    pinMode(RELAY_PINS[i], OUTPUT);
-    relayState[i] = false;
-  }
-  digitalWrite(AC_PIN, RELAY_OFF);
-  pinMode(AC_PIN, OUTPUT);
-  acState = false;
-
-  // Restore the last commanded outputs (see Preferences note above).
+  // Outputs before anything else, so the relays spend as little time as
+  // possible in the reset state.
   prefs.begin("relay", false);
-  uint8_t bits = prefs.getUChar("out", 0);
-  for (int i = 0; i < NUM_RELAYS; i++) {
-    relayState[i] = bits & (1 << i);
-    digitalWrite(RELAY_PINS[i], relayState[i] ? RELAY_ON : RELAY_OFF);
-  }
-  acState = bits & (1 << 7);
-  digitalWrite(AC_PIN, acState ? RELAY_ON : RELAY_OFF);
-  Serial.printf("restored outputs 0x%02x\n", bits);
+  restoreOutputs();
+  restarts = prefs.getUChar("rst", 0);
+  Serial.printf("consecutive self-restarts: %u\n", restarts);
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname(HOSTNAME);
-  WiFi.setAutoReconnect(true);
-  WiFi.persistent(false);
-  WiFi.setSleep(false);  // modem sleep makes some APs drop unicast to this board
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
+  beginWifi();
   Serial.print("Connecting to WiFi");
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+  for (int attempts = 0; WiFi.status() != WL_CONNECTED && attempts < 40; attempts++) {
     delay(300);
     Serial.print(".");
-    attempts++;
-  }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\nWiFi FAILED. Status: " + String(WiFi.status()));
-  } else {
-    Serial.println();
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
     wifiUp = true;
     startMdns();
+  } else {
+    Serial.println("\nWiFi FAILED. Status: " + String(WiFi.status()));
   }
 
   server.on("/", handleRoot);
@@ -248,12 +297,12 @@ void setup() {
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("HTTP server started");
-  touchServed();
+  lastServed = millis();   // start the no-request clock without clearing the restart count
 }
 
 // ---------- Loop ----------
 void loop() {
   server.handleClient();
   ensureWifi();
-  checkWatchdog();
+  checkServeWatchdog();
 }
