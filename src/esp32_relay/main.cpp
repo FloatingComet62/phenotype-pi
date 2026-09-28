@@ -223,7 +223,7 @@ void handleRoot() {
 
 void handleRelay() {
   touchServed();
-  if (!server.hasArg("ch")) {
+  if (!server.hasArg("ch") || !server.hasArg("state")) {
     server.send(400, "application/json", "{\"error\":\"missing ch or state param\"}");
     return;
   }
