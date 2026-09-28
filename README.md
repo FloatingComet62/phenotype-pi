@@ -185,6 +185,16 @@ Row map, measured on site on 28 Sep (`phenotype_edge/stacks.py`). Indexes are th
 
 From the dashboard to a strip: a row's LED card → backend `PUT /v2/actuators/{id}/led` or the power toggle → Pi `POST /stack-led {"stack":1,"shelf":1,"row":2,"r":..,"g":..,"b":..,"intensity":0-100}` → bridge `/led?path=0&start=104&end=190&...&brightness=0-255` → Arduino. `STACK_HOSTS` on the Pi names the bridges in stack order. A strip that is switched off is sent brightness 0 and keeps its colour. Only stack 1 has a bridge; the map is shared by all stacks until a second one is measured.
 
+Pump and pH, the other two things the Arduino does:
+
+| What | Path |
+| --- | --- |
+| Circulation pump | Pump card toggle or its schedule → backend → Pi `/relay-proxy` channel `pump1` → bridge `/pump?speed=N`. On is `PUMP_ON_SPEED` (128, the Arduino sketch's own default), off is 0. |
+| Tank pH | Arduino → bridge `/reading` → the Pi's `stack_poller`, once a minute → backend sensor "Stack 1 Tank pH". Only a reading under 10 s old and between 0 and 14 is posted. |
+| Pump current sense | In the bridge's `/reading` as `motor_voltage`. The backend has no sensor for it yet, so it is not stored. |
+
+The schedule on the pump card is real: the backend sends the pump its state at every scheduled edge and once after the backend starts. A manual toggle holds until the next edge.
+
 What happens when something dies:
 
 | Failure | Response |
@@ -252,6 +262,7 @@ The committed unit assumes `/home/pi/phenotype` and user `pi`. The live Pi uses 
 | EXHAUST_FAN_HOST | *(empty)* | Board whose SSR drives the exhaust fan (`dht1.local`). Empty means channel `exhaust` returns 502. |
 | EXHAUST_FAN_CHANNEL | 1 | SSR channel on that board. |
 | AC2_HOST | *(empty)* | Board with the second AC output (`dht4.local`). Channel `ac2`. |
+| PUMP_ON_SPEED | 128 | PWM a stack's pump runs at when switched on, 0-255. |
 | STACK_HOSTS | *(empty)* | Stack bridges in stack order (`stack1.local`). Position n is stack n. |
 | KEEPALIVE_HOSTS | *(empty)* | Boards that restart themselves when idle and that nothing polls (`stack1.local`). The relay board is always included. |
 | VALVE_MASTER_CHANNEL | *(empty)* | Relay number of the master valve (`4`). Enables channels `valve1`.. . |
