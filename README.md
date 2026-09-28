@@ -43,7 +43,7 @@ Nothing in the room talks to the internet except the Pi. The boards are plain HT
 | Zone 1 | dht1 | 192.168.8.198 (was .195 until 25 Sep) | 38:3e:51:6f:45:a8 | `esp32_dht` | SSR ch1 (GPIO 25) drives the exhaust fan. Drops off Wi-Fi for minutes at a time; see §8. |
 | Zone 2 | dht2 | 192.168.8.200 | 0c:b8:15:75:b4:70 | `esp32_dht2` | no SSR |
 | Zone 3 | dht3 | 192.168.8.197 | 08:a6:f7:b1:39:48 | `esp32_dht3` | no SSR |
-| Zone 4 | dht4 | 192.168.8.199 | 38:3e:51:6f:2b:e4 | `esp32_dht4` | SSR code present, nothing wired |
+| Zone 4 | dht4 | 192.168.8.199 | 38:3e:51:6f:2b:e4 | `esp32_dht4` (`src/esp32_dht_ac`, the owner's sketch) | SHT20 on GPIO 21/22. AC output on GPIO 23, active high = **AC 2** |
 | relay | relay | 192.168.8.196 | c0:cd:d6:d0:04:64 | `esp32_relay`, flashed 28 Sep (commit 9547fad) | Relays 1-4 on GPIO 16/17/18/19 = water valves; GPIO 23 = AC, wired inverted, the Pi compensates |
 
 On the Pi (`phenotype@pi`, reachable as `ssh pi.apsdev.in` through the Cloudflare tunnel):
@@ -120,11 +120,16 @@ Two things that bit us:
 
 Four relays on GPIO 16/17/18/19 (`/relay?ch=1..4`, `/all`), each driving a **water valve**, and the AC output on GPIO 23 (`/ac`), and `/status`. All outputs are active-low. The AC contact is wired inverted, so a released output means the AC runs; the Pi's relay proxy compensates and this sketch does not. Hostname `relay`, MAC `c0:cd:d6:d0:04:64`.
 
-| Dashboard card | Backend actuator | Pi channel | Board route |
+| Dashboard card | Backend actuator | Pi channel | What the Pi does |
 | --- | --- | --- | --- |
-| AC 1 (Farm climate control) | 9001 | `ac` | `/ac` |
-| Light 1-4 (Relay board on Pi 1). These are the valves; the names are left over from the old site. Mapping valve → stack is not decided yet. | 1-4 | `1`-`4` | `/relay?ch=N` |
-| AC (Relay board on Pi 1, legacy) | 5 | `ac` | `/ac`, same output as AC 1 |
+| AC 1 (Farm climate control) | 9001 | `ac` | relay board `/ac`, inverted |
+| AC 2 (Farm climate control) | 9002 | `ac2` | dht4 `/ac`, not inverted |
+| Exhaust fan | 9003 | `exhaust` | dht1 `/relay?ch=1` |
+| Stack 1 / 2 / 3 water valve (Stacks section) | 8101 / 8102 / 8103 | `valve1` / `valve2` / `valve3` | relay 1 / 2 / 3 **plus the master** |
+| Valve relay 1-3, Master valve relay (direct) | 1-4 | `1`-`4` | one raw relay, no master logic |
+| AC (legacy) | 5 | `ac` | same output as AC 1 |
+
+**Valves.** Relay 4 is the master valve; relays 1-3 are branches. A branch gets water only while the master is open too (found on site on 28 Sep: 1+2 dry, 1+3 dry, 4+1 water). The `valveN` channels open the master before the branch, and close it only when the last open branch closes. Which branch feeds which stack has not been confirmed; they are assigned to stacks 1-3 in order for now, and changing that is one line in the backend's `provision.py`. The "direct" cards switch a single relay and exist for testing; using them alongside the stack cards will make the dashboard states disagree.
 
 Wi-Fi behaviour, in order of escalation:
 
@@ -184,6 +189,8 @@ The committed unit assumes `/home/pi/phenotype` and user `pi`. The live Pi uses 
 | RELAY_HOST | relay.local | The 4-channel relay board. |
 | EXHAUST_FAN_HOST | *(empty)* | Board whose SSR drives the exhaust fan (`dht1.local`). Empty means channel `exhaust` returns 502. |
 | EXHAUST_FAN_CHANNEL | 1 | SSR channel on that board. |
+| AC2_HOST | *(empty)* | Board with the second AC output (`dht4.local`). Channel `ac2`. |
+| VALVE_MASTER_CHANNEL | *(empty)* | Relay number of the master valve (`4`). Enables channels `valve1`.. . |
 | REQUEST_TIMEOUT_SECONDS | 8 | For board, relay and ingest requests. |
 
 Sensor names in the backend must be `Zone {n} Temperature` and `Zone {n} Humidity`. The backend provisions that pair automatically for every zone in the farm layout, so adding a zone on the dashboard's Farm setup page plus a board in `DHT_HOSTS` is all that is needed for a new zone.
