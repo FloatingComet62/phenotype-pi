@@ -170,20 +170,20 @@ The Arduino's pins 0 and 1 are also its USB serial. Unplug the ESP32 wires while
 | `GET /pump?speed=180` | Sends `3,speed`. 0-255, 0 stops the pump. |
 | `GET /status` | Readings, the last command sent on each path, line counters, signal strength, uptime, restart count |
 
-Row map, measured on site on 28 Sep (`phenotype_edge/stacks.py`). Indexes are the Arduino's, 0-299:
+Row map, measured on site on 28 Sep, strips per pin confirmed 13 Oct. Shelf 1 is the bottom shelf (`phenotype_edge/stacks.py`). Indexes are the Arduino's, 0-299:
 
 | Shelf | Row | Path (Arduino pin) | LEDs |
 | --- | --- | --- | --- |
 | 1 | 1 | 0 (13) | 4-87 |
 | 1 | 2 | 0 (13) | 104-190 |
 | 1 | 3 | 0 (13) | 205-299 |
-| 1 | 4 | 2 (11) | 1-83 |
-| 2 | 1 | 1 (12) | 1-86 |
-| 2 | 2 | 1 (12) | 105-189 |
-| 2 | 3 | 1 (12) | 206-290 |
-| 2 | 4 | 2 (11) | 106-188 |
+| 1 | 4 | 1 (12) | 1-83 |
+| 2 | 1 | 2 (11) | 1-86 |
+| 2 | 2 | 2 (11) | 105-189 |
+| 2 | 3 | 2 (11) | 206-290 |
+| 2 | 4 | 1 (12) | 106-188 |
 
-From the dashboard to a strip: a row's LED card → backend `PUT /v2/actuators/{id}/led` or the power toggle → Pi `POST /stack-led {"stack":1,"shelf":1,"row":2,"r":..,"g":..,"b":..,"intensity":0-100}` → bridge `/led?path=0&start=104&end=190&...&brightness=0-255` → Arduino. `STACK_HOSTS` on the Pi names the bridges in stack order. A strip that is switched off is sent brightness 0 and keeps its colour. Only stack 1 has a bridge; the map is shared by all stacks until a second one is measured.
+From the dashboard to a strip: a row's LED card → backend `PUT /v2/actuators/{id}/led` (Update light; Off = brightness 0) → Pi `POST /stack-led {"stack":1,"shelf":1,"row":2,"r":..,"g":..,"b":..,"intensity":0-100}` → bridge `/led?path=0&start=104&end=190&...&brightness=0-255` → Arduino. `STACK_HOSTS` on the Pi names the bridges in stack order. Only stack 1 has a bridge; the map is shared by all stacks until a second one is measured.
 
 Pump and pH, the other two things the Arduino does:
 
