@@ -15,11 +15,11 @@ LED_MAP = {
     (1, 1): (0, 4, 87),
     (1, 2): (0, 104, 190),
     (1, 3): (0, 205, 299),
-    (1, 4): (1, 106, 188),
+    (1, 4): (1, 124, 201),
     (2, 1): (2, 1, 86),
     (2, 2): (2, 105, 189),
     (2, 3): (2, 206, 290),
-    (2, 4): (1, 19, 96),
+    (2, 4): (1, 1, 83),
 }
 # ponytail: one map for every stack, because one stack is wired. Make it
 # per-stack (keyed by stack number too) when a second stack's strips are
