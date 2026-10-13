@@ -184,9 +184,8 @@ void readArduino() {
     linesOk++;
     unsigned long now = millis();
     if (lastLineAt && now - lastLineAt > TELEMETRY_GAP_RESET_MS) {
-      Serial.println("telemetry resumed after a gap, sending the commanded state again");
-      arduinoGaps++;
-      startReassert();
+      Serial.println("telemetry resumed after a gap");
+      arduinoGaps++;   // counted only: nothing is re-sent (one press = one line)
     }
     lastLineAt = now;
   }
@@ -388,7 +387,8 @@ String statusJson() {
   json += ",\"wifi_reason\":" + String(wifiReason);
   json += ",\"rssi\":" + String(WiFi.RSSI());
   json += ",\"uptime_s\":" + String(millis() / 1000);
-  json += ",\"restarts\":" + String(restarts) + "}";
+  json += ",\"restarts\":" + String(restarts);
+  json += ",\"reset_reason\":" + String((int)esp_reset_reason()) + "}";  // 1 power-on, 3 software, 4 panic, 5-7 watchdog, 9 brownout
   return json;
 }
 
@@ -544,7 +544,7 @@ void setup() {
   Serial.println("HTTP server started");
   lastServed = millis();
   startHardwareWatchdog();   // after the Wi-Fi wait above, which may take 12 s
-  startReassert();           // the Arduino may have reset while we were away
+  // Nothing is re-sent at boot: the owner wants exactly one line per press.
 }
 
 // ---------- Loop ----------
@@ -552,7 +552,6 @@ void loop() {
   esp_task_wdt_reset();
   readArduino();
   server.handleClient();
-  reassertStep();
   ensureWifi();
   checkServeWatchdog();
 }
