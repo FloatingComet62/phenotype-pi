@@ -11,9 +11,9 @@ from phenotype_edge.stacks import LED_MAP, brightness, stack_host
 
 def test_map_is_the_one_measured_on_site():
     assert LED_MAP[(1, 1)] == (0, 4, 87)
-    assert LED_MAP[(1, 4)] == (1, 1, 83)       # row 4s on pin 12
+    assert LED_MAP[(1, 4)] == (1, 106, 188)    # row 4s on pin 12
     assert LED_MAP[(2, 3)] == (2, 206, 290)    # upper shelf on pin 11
-    assert LED_MAP[(2, 4)] == (1, 106, 188)
+    assert LED_MAP[(2, 4)] == (1, 19, 96)
     assert len(LED_MAP) == 8
 
 

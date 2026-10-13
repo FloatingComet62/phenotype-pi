@@ -177,11 +177,11 @@ Row map, measured on site on 28 Sep, strips per pin confirmed 13 Oct. Shelf 1 is
 | 1 | 1 | 0 (13) | 4-87 |
 | 1 | 2 | 0 (13) | 104-190 |
 | 1 | 3 | 0 (13) | 205-299 |
-| 1 | 4 | 1 (12) | 1-83 |
+| 1 | 4 | 1 (12) | 106-188 |
 | 2 | 1 | 2 (11) | 1-86 |
 | 2 | 2 | 2 (11) | 105-189 |
 | 2 | 3 | 2 (11) | 206-290 |
-| 2 | 4 | 1 (12) | 106-188 |
+| 2 | 4 | 1 (12) | 19-96 |
 
 From the dashboard to a strip: a row's LED card → backend `PUT /v2/actuators/{id}/led` (Update light; Off = brightness 0) → Pi `POST /stack-led {"stack":1,"shelf":1,"row":2,"r":..,"g":..,"b":..,"intensity":0-100}` → bridge `/led?path=0&start=104&end=190&...&brightness=0-255` → Arduino. `STACK_HOSTS` on the Pi names the bridges in stack order. Only stack 1 has a bridge; the map is shared by all stacks until a second one is measured.
 
