@@ -116,21 +116,52 @@ async def _switch_valve(client, host: str, branch: str, want: bool) -> dict:
     return await _get_json(client, f"http://{host}/status")
 
 
+# Stack bridges get one command at a time, STACK_COMMAND_GAP_S apart: the
+# Arduino behind them mis-applies commands that arrive in bursts (a slider
+# drag, "apply to whole shelf"), while single commands are fine. If a newer
+# command for the same row (or pump) arrives while one is waiting, only the
+# newest is sent.
+# ponytail: one lock for all bridges; per-bridge locks when there is more
+# than one stack.
+_bridge_lock = asyncio.Lock()
+_bridge_last_sent = 0.0
+_bridge_latest: dict[str, int] = {}
+
+
+async def _bridge_command(host_name: str, query: str, key: str) -> dict | None:
+    """GET a bridge URL in turn. None means a newer command replaced it."""
+    global _bridge_last_sent
+    key = f"{host_name}:{key}"
+    ticket = _bridge_latest[key] = _bridge_latest.get(key, 0) + 1
+    loop = asyncio.get_running_loop()
+    async with _bridge_lock:
+        if _bridge_latest[key] != ticket:
+            return None
+        wait = _bridge_last_sent + settings.stack_command_gap_s - loop.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        host = await resolve(host_name)
+        try:
+            async with _client() as client:
+                return await _get_json(client, f"http://{host}/{query}")
+        except httpx.HTTPError as error:
+            forget(host_name)
+            raise HTTPException(502, f"Could not reach {host_name} ({host}): {error}")
+        except ValueError:
+            raise HTTPException(502, f"{host_name} returned a non-JSON response")
+        finally:
+            _bridge_last_sent = loop.time()
+
+
 async def _switch_pump(stack: str, want: bool) -> dict:
     """Circulation pump of one stack, through its bridge."""
     host_name = stack_host(settings.stack_hosts, int(stack)) if stack.isdigit() else None
     if host_name is None:
         raise HTTPException(404, f"Stack '{stack}' has no bridge in STACK_HOSTS")
     speed = max(0, min(255, settings.pump_on_speed)) if want else 0
-    host = await resolve(host_name)
-    try:
-        async with _client() as client:
-            body = await _get_json(client, f"http://{host}/pump?speed={speed}")
-    except httpx.HTTPError as error:
-        forget(host_name)
-        raise HTTPException(502, f"Could not reach {host_name} ({host}): {error}")
-    except ValueError:
-        raise HTTPException(502, f"{host_name} returned a non-JSON response")
+    body = await _bridge_command(host_name, f"pump?speed={speed}", "pump")
+    if body is None:
+        return {"ok": True, "confirmed_state": want, "superseded": True}
     answer = {
         "ok": body.get("pump_speed") == speed,
         "confirmed_state": bool(body.get("pump_speed")),
@@ -248,15 +279,9 @@ async def stack_led(payload: StackLedIn):
         f"&r={payload.r}&g={payload.g}&b={payload.b}"
         f"&brightness={brightness(payload.intensity)}"
     )
-    host = await resolve(host_name)
-    try:
-        async with _client() as client:
-            body = await _get_json(client, f"http://{host}/led?{query}")
-    except httpx.HTTPError as error:
-        forget(host_name)
-        raise HTTPException(502, f"Could not reach {host_name} ({host}): {error}")
-    except ValueError:
-        raise HTTPException(502, f"{host_name} returned a non-JSON response")
+    body = await _bridge_command(host_name, f"led?{query}", f"led:{path}:{start}:{end}")
+    if body is None:
+        return {"ok": True, "superseded": True, "sent": None}
     return {
         "ok": True,
         "arduino_online": bool(body.get("arduino_online")),

@@ -64,3 +64,26 @@ def test_unknown_stack_or_row_is_refused_before_anything_is_sent(bridge):
             send(**bad)
         assert e.value.status_code == 404
     assert bridge == []
+
+
+def test_bridge_commands_go_one_at_a_time_and_the_newest_row_wins(bridge, monkeypatch):
+    monkeypatch.setattr(settings, "stack_command_gap_s", 0.2)
+    times = []
+    real = edge._get_json
+
+    async def timed(client, url):
+        times.append(asyncio.get_running_loop().time())
+        return await real(client, url)
+
+    monkeypatch.setattr(edge, "_get_json", timed)
+
+    async def burst():
+        rows = [dict(row=1, r=1), dict(row=2, r=2), dict(row=2, r=3), dict(row=2, r=4)]
+        base = dict(stack=1, shelf=1, g=0, b=0, intensity=100)
+        return await asyncio.gather(*(edge.stack_led(edge.StackLedIn(**(base | x))) for x in rows))
+
+    out = asyncio.run(burst())
+    sent = [u.split("?")[1].split("&r=")[1].split("&")[0] for u in bridge]
+    assert sent == ["1", "4"], "row 1 once, then only the newest row-2 colour"
+    assert [o.get("superseded", False) for o in out] == [False, True, True, False]
+    assert times[1] - times[0] >= 0.19, "commands are spaced"

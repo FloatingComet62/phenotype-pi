@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # PWM the pump runs at when it is switched on, 0-255. 128 is the speed
     # the Arduino sketch itself starts the pump at. Off is always 0.
     pump_on_speed: int = 128
+    # Minimum pause between two commands to a stack bridge. The stack's
+    # Arduino copes with one command at a time, not bursts.
+    stack_command_gap_s: float = 1.0
 
     @property
     def board_mac_map(self) -> dict[str, str]:
