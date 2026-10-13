@@ -274,11 +274,13 @@ async def stack_led(payload: StackLedIn):
             404, f"Shelf {payload.shelf} row {payload.row} is not in the LED map"
         )
     path, start, end = segment
-    query = (
-        f"path={path}&start={start}&end={end}"
-        f"&r={payload.r}&g={payload.g}&b={payload.b}"
-        f"&brightness={brightness(payload.intensity)}"
-    )
+    # Dimming is folded into the colour and brightness is always 255: the
+    # Arduino's brightness acts on the whole strip, so a row sent with
+    # brightness 0 blacked out every row and the next row "on" relit them
+    # all. Off is plain black, which touches only this row.
+    level = brightness(payload.intensity)
+    r, g, b = (round(c * level / 255) for c in (payload.r, payload.g, payload.b))
+    query = f"path={path}&start={start}&end={end}&r={r}&g={g}&b={b}&brightness=255"
     body = await _bridge_command(host_name, f"led?{query}", f"led:{path}:{start}:{end}")
     if body is None:
         return {"ok": True, "superseded": True, "sent": None}

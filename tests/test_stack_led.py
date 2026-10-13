@@ -53,7 +53,7 @@ def send(**kw):
 
 def test_a_row_becomes_the_right_segment(bridge):
     out = send()
-    assert bridge == ["http://10.0.0.9/led?path=0&start=104&end=190&r=255&g=60&b=200&brightness=204"]
+    assert bridge == ["http://10.0.0.9/led?path=0&start=104&end=190&r=204&g=48&b=160&brightness=255"]
     assert out["ok"] and out["arduino_online"] is False
     assert out["sent"] == {"path": 0, "start": 104, "end": 190}
 
@@ -87,3 +87,8 @@ def test_bridge_commands_go_one_at_a_time_and_the_newest_row_wins(bridge, monkey
     assert sent == ["1", "4"], "row 1 once, then only the newest row-2 colour"
     assert [o.get("superseded", False) for o in out] == [False, True, True, False]
     assert times[1] - times[0] >= 0.19, "commands are spaced"
+
+
+def test_off_is_black_for_that_row_only(bridge):
+    send(intensity=0)
+    assert bridge == ["http://10.0.0.9/led?path=0&start=104&end=190&r=0&g=0&b=0&brightness=255"]
