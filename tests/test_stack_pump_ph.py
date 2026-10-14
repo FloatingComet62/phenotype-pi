@@ -28,6 +28,10 @@ def test_pump_on_is_the_configured_speed_and_off_is_zero(monkeypatch):
     assert off["ok"] and off["confirmed_state"] is False
     assert seen == ["http://10.0.0.9/pump?speed=128", "http://10.0.0.9/pump?speed=0"]
 
+    seen.clear()
+    asyncio.run(edge.relay_proxy(edge.RelayProxyIn(channel="pump1", state=True, speed=200)))
+    assert seen == ["http://10.0.0.9/pump?speed=200"], "the website's speed wins"
+
     online["v"] = False
     assert "not responding" in call("pump1", True)["warning"]
 

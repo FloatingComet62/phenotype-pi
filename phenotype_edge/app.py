@@ -72,6 +72,8 @@ app = FastAPI(title="Phenotyping Pi Edge Service", lifespan=lifespan)
 class RelayProxyIn(BaseModel):
     channel: str
     state: bool
+    # Pump channels only: speed when on (0-255). Missing = PUMP_ON_SPEED.
+    speed: int | None = Field(default=None, ge=0, le=255)
 
 
 @app.get("/health")
@@ -153,12 +155,13 @@ async def _bridge_command(host_name: str, query: str, key: str) -> dict | None:
             _bridge_last_sent = loop.time()
 
 
-async def _switch_pump(stack: str, want: bool) -> dict:
+async def _switch_pump(stack: str, want: bool, on_speed: int | None = None) -> dict:
     """Circulation pump of one stack, through its bridge."""
     host_name = stack_host(settings.stack_hosts, int(stack)) if stack.isdigit() else None
     if host_name is None:
         raise HTTPException(404, f"Stack '{stack}' has no bridge in STACK_HOSTS")
-    speed = max(0, min(255, settings.pump_on_speed)) if want else 0
+    on = settings.pump_on_speed if on_speed is None else on_speed
+    speed = max(0, min(255, on)) if want else 0
     body = await _bridge_command(host_name, f"pump?speed={speed}", "pump")
     if body is None:
         return {"ok": True, "confirmed_state": want, "superseded": True}
@@ -206,7 +209,7 @@ async def relay_proxy(payload: RelayProxyIn):
         ch = settings.exhaust_fan_channel
         path, confirm_key = f"/relay?ch={ch}&state={state}", f"relay{ch}"
     elif channel.startswith("pump"):
-        return await _switch_pump(channel[len("pump"):], want)
+        return await _switch_pump(channel[len("pump"):], want, payload.speed)
     elif channel.startswith("valve"):
         valve = channel[len("valve"):]
         if not settings.valve_master_channel:
