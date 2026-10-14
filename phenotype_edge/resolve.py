@@ -98,6 +98,15 @@ async def _sweep() -> None:
         await asyncio.gather(*(ping(ip) for ip in hosts[i : i + 64]))
 
 
+async def _mac_at(ip: str) -> str | None:
+    """MAC the ARP table holds for ``ip``, or None if it has no live entry."""
+    for line in (await _sh("ip", "-4", "neigh", "show", ip)).splitlines():
+        f = line.split()
+        if "lladdr" in f and f[-1] in _STATE_RANK:
+            return f[f.index("lladdr") + 1].lower()
+    return None
+
+
 _last_sweep = 0.0
 
 
@@ -125,10 +134,16 @@ async def resolve(host: str) -> str:
     if not host.endswith(".local"):
         return host
     name = host.lower()
+    mac = settings.board_mac_map.get(name)
     ip = _cache.get(name)
     if ip:
-        return ip
-    mac = settings.board_mac_map.get(name)
+        # Leases move between boards: on 14 Oct dht4's old address went to
+        # dht2, which answered AC 2 commands with 404 rather than failing.
+        # So a remembered address is used only while it still has this MAC.
+        if not mac or await _mac_at(ip) in (mac, None):
+            return ip
+        logger.info("%s: %s now belongs to another board", host, ip)
+        _cache.pop(name, None)
     if mac:
         ip = await _by_mac(mac)
         if ip:
