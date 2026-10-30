@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <Wire.h>
@@ -8,8 +9,16 @@
 #include <esp_task_wdt.h>
 
 // ---------- Config ----------
-const char* WIFI_SSID = WIFI_SSID_HOME;
-const char* WIFI_PASSWORD = WIFI_PASSWORD_HOME;
+// Known networks; WiFiMulti joins whichever is in range (strongest first),
+// so a board keeps working while the farm moves from one router to another.
+WiFiMulti wifiMulti;
+
+void addNetworks() {
+#ifdef WIFI_SSID_FARM
+  wifiMulti.addAP(WIFI_SSID_FARM, WIFI_PASSWORD_FARM);
+#endif
+  wifiMulti.addAP(WIFI_SSID_HOME, WIFI_PASSWORD_HOME);
+}
 #ifndef HOSTNAME_STR
 #define HOSTNAME_STR "dht1"   // override per board with build_flags in platformio.ini
 #endif
@@ -210,7 +219,7 @@ void ensureWifi() {
     startMdns();
   } else if (!up) {
     Serial.println("WiFi down, reconnecting");
-    WiFi.reconnect();
+    wifiMulti.run(8000);   // any known network; well inside the 30 s watchdog
   }
   wifiUp = up;
 }
@@ -322,21 +331,17 @@ void setup() {
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
   WiFi.setSleep(false);  // modem sleep makes some APs drop unicast to this board
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  addNetworks();
 
   Serial.print("Connecting to WiFi");
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
-    delay(300);
+  for (int attempts = 0; attempts < 3 && wifiMulti.run(8000) != WL_CONNECTED; attempts++)
     Serial.print(".");
-    attempts++;
-  }
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("\nWiFi FAILED. Status: " + String(WiFi.status()));
   } else {
     Serial.println();
-    Serial.print("IP address: ");
+    Serial.printf("on %s, IP address: ", WiFi.SSID().c_str());
     Serial.println(WiFi.localIP());
   }
 
