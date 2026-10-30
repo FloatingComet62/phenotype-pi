@@ -42,8 +42,8 @@
 // Nothing here switches the pump or the LEDs off by itself.
 
 // ---------- Config ----------
-const char* WIFI_SSID     = WIFI_SSID_HOME;
-const char* WIFI_PASSWORD = WIFI_PASSWORD_HOME;
+const char* WIFI_SSID     = WIFI_SSID_FARM;      // Poly House, 2.4 GHz
+const char* WIFI_PASSWORD = WIFI_PASSWORD_FARM;
 
 #ifndef HOSTNAME_STR
 #define HOSTNAME_STR "stack1"   // one board per stack: stack1, stack2, ...
