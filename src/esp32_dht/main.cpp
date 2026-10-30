@@ -9,15 +9,13 @@
 #include <esp_task_wdt.h>
 
 // ---------- Config ----------
-// Known networks; WiFiMulti joins whichever is in range (strongest first),
-// so a board keeps working while the farm moves from one router to another.
+// The farm's network only (WIFI_SSID_FARM in secrets.h, the Poly House
+// router's 2.4 GHz band). ponytail: WiFiMulti with one entry; add more addAP
+// lines if a board ever has to roam between routers.
 WiFiMulti wifiMulti;
 
 void addNetworks() {
-#ifdef WIFI_SSID_FARM
   wifiMulti.addAP(WIFI_SSID_FARM, WIFI_PASSWORD_FARM);
-#endif
-  wifiMulti.addAP(WIFI_SSID_HOME, WIFI_PASSWORD_HOME);
 }
 #ifndef HOSTNAME_STR
 #define HOSTNAME_STR "dht1"   // override per board with build_flags in platformio.ini
