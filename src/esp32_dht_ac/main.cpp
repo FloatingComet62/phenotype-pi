@@ -8,13 +8,14 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include "../secrets.h"
+#include <esp_task_wdt.h>
 
 // ============================================================
 // WIFI CONFIG
 // ============================================================
 
-const char* WIFI_SSID     = WIFI_SSID_HOME;
-const char* WIFI_PASSWORD = WIFI_PASSWORD_HOME;
+const char* WIFI_SSID     = WIFI_SSID_FARM;      // Poly House, 2.4 GHz
+const char* WIFI_PASSWORD = WIFI_PASSWORD_FARM;
 
 #ifndef HOSTNAME_STR
 #define HOSTNAME_STR "dht4"
@@ -328,7 +329,40 @@ String statusJson() {
 // ROOT
 // ------------------------------------------------------------
 
+// ------------------------------------------------------------
+// FREEZE PROTECTION (added 30 Oct 2026)
+// A board can stay joined to Wi-Fi yet stop answering; it never sees a
+// disconnect, so the reconnect logic above never runs. Two guards:
+// - no HTTP request served for 5 min (the Pi polls every ~2 min): reboot;
+// - hardware watchdog: loop() stuck for 30 s: the chip resets itself.
+// ------------------------------------------------------------
+unsigned long lastServed = 0;
+const unsigned long SERVE_TIMEOUT = 5UL * 60UL * 1000UL;
+const int HARDWARE_WATCHDOG_S = 30;
+
+void touchServed() { lastServed = millis(); }
+
+void checkServed() {
+    if (millis() - lastServed > SERVE_TIMEOUT) {
+        Serial.println("no HTTP request served in 5 min, rebooting");
+        delay(100);
+        ESP.restart();
+    }
+}
+
+void startHardwareWatchdog() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    esp_task_wdt_config_t config = {.timeout_ms = HARDWARE_WATCHDOG_S * 1000,
+                                    .idle_core_mask = 0, .trigger_panic = true};
+    esp_task_wdt_reconfigure(&config);
+#else
+    esp_task_wdt_init(HARDWARE_WATCHDOG_S, true);
+#endif
+    esp_task_wdt_add(NULL);
+}
+
 void handleRoot() {
+    touchServed();
 
     server.send(
         200,
@@ -349,6 +383,7 @@ void handleRoot() {
 // ------------------------------------------------------------
 
 void handleReading() {
+    touchServed();
 
     if (isnan(lastTemp) ||
         isnan(lastHum)) {
@@ -397,6 +432,7 @@ void handleReading() {
 // ------------------------------------------------------------
 
 void handleStatus() {
+    touchServed();
 
     server.send(
         200,
@@ -411,6 +447,7 @@ void handleStatus() {
 // ------------------------------------------------------------
 
 void handleAC() {
+    touchServed();
 
     if (!server.hasArg("state")) {
 
@@ -888,6 +925,9 @@ void setup() {
     delay(2000);
 
     updateSensor();
+
+    touchServed();
+    startHardwareWatchdog();
 }
 
 
@@ -897,6 +937,8 @@ void setup() {
 
 void loop() {
 
+    esp_task_wdt_reset();
+
     // Process HTTP requests
     server.handleClient();
 
@@ -905,4 +947,7 @@ void loop() {
 
     // Monitor WiFi
     ensureWifi();
+
+    // Frozen-but-connected guard
+    checkServed();
 }
