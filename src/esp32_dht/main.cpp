@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include "../secrets.h"
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 
 // ---------- Config ----------
 const char* WIFI_SSID = WIFI_SSID_HOME;
@@ -64,6 +65,54 @@ float readSHT20(uint8_t command) {
   }
 }
 
+// ---------- I2C ----------
+// Boards have been wired to either SDA/SCL pair; probe for the SHT20 (0x40)
+// on each and keep the first that ACKs. Falls back to 18/19.
+int sdaPin = 18, sclPin = 19;
+
+bool probeI2c() {
+  const int I2C_PAIRS[][2] = {{18, 19}, {21, 22}};
+  for (auto& pr : I2C_PAIRS) {
+    Wire.end();
+    Wire.begin(pr[0], pr[1]);
+    Wire.setClock(100000);  // SHT20 max is 400kHz, but 100kHz is safer
+    Wire.setTimeOut(50);    // a missing or stuck sensor must not stall loop()
+    Wire.beginTransmission(SHT20_ADDR);
+    if (Wire.endTransmission() == 0) {
+      sdaPin = pr[0]; sclPin = pr[1];
+      Serial.printf("SHT20 found on SDA=%d SCL=%d\n", sdaPin, sclPin);
+      return true;
+    }
+    Serial.printf("no SHT20 on SDA=%d SCL=%d\n", pr[0], pr[1]);
+  }
+  Wire.end();
+  Wire.begin(18, 19);
+  Wire.setClock(100000);
+  Wire.setTimeOut(50);
+  sdaPin = 18; sclPin = 19;
+  Serial.println("SHT20 not found on either pair; check wiring");
+  return false;
+}
+
+// A sensor that glitched (loose wire, noise from the SSR) can leave SDA held
+// low, and every later read fails until a reboot. Nine SCL pulses release
+// it; then the pins are probed again, which also finds a sensor that was
+// plugged in after boot.
+int consecutiveFails = 0;
+unsigned long i2cRecoveries = 0;
+
+void recoverI2c() {
+  Wire.end();
+  pinMode(sdaPin, INPUT_PULLUP);
+  pinMode(sclPin, OUTPUT);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(sclPin, LOW);  delayMicroseconds(5);
+    digitalWrite(sclPin, HIGH); delayMicroseconds(5);
+  }
+  i2cRecoveries++;
+  probeI2c();
+}
+
 // ---------- Background sensor update ----------
 void updateSensor() {
   unsigned long now = millis();
@@ -73,16 +122,15 @@ void updateSensor() {
   float t = readSHT20(TEMP_CMD);
   float h = readSHT20(HUM_CMD);
 
-  if (isnan(t) || isnan(h)) {
+  if (isnan(t) || isnan(h) || t < -40 || t > 125 || h < 0 || h > 100) {
     failCount++;
+    if (++consecutiveFails >= 5) {   // ~7.5 s of failures
+      consecutiveFails = 0;
+      recoverI2c();
+    }
     return;
   }
-
-  // Sanity check: SHT20 valid range
-  if (t < -40 || t > 125 || h < 0 || h > 100) {
-    failCount++;
-    return;
-  }
+  consecutiveFails = 0;
 
   lastTemp = t;
   lastHum = h;
@@ -100,12 +148,37 @@ const unsigned long SERVE_TIMEOUT = 5UL * 60UL * 1000UL;
 
 void touchServed() { lastServed = millis(); }
 
+// Free memory is checked too: this sketch allocates almost nothing, so a
+// heap below 20 KB means something leaks, and a clean restart beats running
+// on until the network stack cannot get a buffer.
+const uint32_t MIN_FREE_HEAP = 20000;
+
 void checkWatchdog() {
   if (millis() - lastServed > SERVE_TIMEOUT) {
     Serial.println("no HTTP request served in 5 min, rebooting");
     delay(100);
     ESP.restart();
   }
+  if (ESP.getFreeHeap() < MIN_FREE_HEAP) {
+    Serial.printf("free heap %u B, rebooting\n", ESP.getFreeHeap());
+    delay(100);
+    ESP.restart();
+  }
+}
+
+// Hardware watchdog: if loop() itself hangs (Wi-Fi driver, I2C), the checks
+// above never run. This resets the chip after 30 s without a loop pass.
+const int HARDWARE_WATCHDOG_S = 30;
+
+void startHardwareWatchdog() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t config = {.timeout_ms = HARDWARE_WATCHDOG_S * 1000,
+                                  .idle_core_mask = 0, .trigger_panic = true};
+  esp_task_wdt_reconfigure(&config);
+#else
+  esp_task_wdt_init(HARDWARE_WATCHDOG_S, true);
+#endif
+  esp_task_wdt_add(NULL);
 }
 
 // ---------- Wi-Fi keepalive ----------
@@ -189,15 +262,22 @@ void handleStatus() {
 void handleReading() {
   touchServed();
   if (isnan(lastTemp) || isnan(lastHum)) {
-    server.send(503, "application/json", "{\"error\":\"No valid reading yet\"}");
+    char body[160];
+    snprintf(body, sizeof(body),
+      "{\"error\":\"No valid reading yet\",\"sda\":%d,\"scl\":%d,\"fail_count\":%d,\"i2c_recoveries\":%lu}",
+      sdaPin, sclPin, failCount, i2cRecoveries);
+    server.send(503, "application/json", body);
     return;
   }
 
   unsigned long ageSeconds = (millis() - lastGoodReadTime) / 1000;
-  char payload[200];
+  char payload[360];
   snprintf(payload, sizeof(payload),
-    "{\"temperature_c\":%.2f,\"humidity_percent\":%.1f,\"age_seconds\":%lu,\"fail_count\":%d,\"success_count\":%d}",
-    lastTemp, lastHum, ageSeconds, failCount, successCount);
+    "{\"temperature_c\":%.2f,\"humidity_percent\":%.1f,\"age_seconds\":%lu,\"fail_count\":%d,\"success_count\":%d,"
+    "\"i2c_recoveries\":%lu,\"free_heap\":%u,\"min_free_heap\":%u,\"rssi\":%d,\"uptime_s\":%lu,\"reset_reason\":%d}",
+    lastTemp, lastHum, ageSeconds, failCount, successCount,
+    i2cRecoveries, ESP.getFreeHeap(), ESP.getMinFreeHeap(), WiFi.RSSI(),
+    millis() / 1000, (int)esp_reset_reason());
   server.send(200, "application/json", payload);
 }
 
@@ -235,28 +315,7 @@ void setup() {
   Serial.printf("restored SSR 0x%02x\n", bits);
 #endif
   
-  // Boards have been wired to either SDA/SCL pair; probe for the SHT20 (0x40)
-  // on each at boot and keep the first that ACKs. Falls back to 18/19.
-  const int I2C_PAIRS[][2] = {{18, 19}, {21, 22}};
-  bool found = false;
-  for (auto& pr : I2C_PAIRS) {
-    Wire.end();
-    Wire.begin(pr[0], pr[1]);
-    Wire.setClock(100000);  // SHT20 max is 400kHz, but 100kHz is safer
-    Wire.beginTransmission(SHT20_ADDR);
-    if (Wire.endTransmission() == 0) {
-      Serial.printf("SHT20 found on SDA=%d SCL=%d\n", pr[0], pr[1]);
-      found = true;
-      break;
-    }
-    Serial.printf("no SHT20 on SDA=%d SCL=%d\n", pr[0], pr[1]);
-  }
-  if (!found) {
-    Wire.end();
-    Wire.begin(18, 19);
-    Wire.setClock(100000);
-    Serial.println("SHT20 not found on either pair; check wiring");
-  }
+  probeI2c();
 
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
@@ -299,10 +358,12 @@ void setup() {
 
   delay(2000);
   updateSensor();
+  startHardwareWatchdog();   // after the Wi-Fi wait above
 }
 
 // ---------- Loop ----------
 void loop() {
+  esp_task_wdt_reset();
   server.handleClient();
   updateSensor();
   ensureWifi();
